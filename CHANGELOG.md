@@ -26,3 +26,10 @@ e este projeto adere ao [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   - `evaluate.py`: fluxo dedicado de avaliação em dados de teste.
   - `export.py`: geração de exportações (artefatos) dos modelos prontos.
   - `train.py`: fluxo principal de execução de treinamento.
+- Configuração do gerenciador `mise` para fixar a versão do Python em `3.12.13` para o projeto.
+- Instalação e ativação do suporte nativo à placa de vídeo (GPU NVIDIA RTX) via PyTorch com CUDA 12.1.
+- Instalação das dependências gerais do projeto listadas no `requirements.txt`.
+
+### Corrigido
+- Resolução de conflito de arquitetura e distribuição isolando o ambiente virtual do Python 3.14 global.
+- Correção de erro de ativação de bibliotecas no `.venv\pyvenv.cfg` mapeando os binários diretos instalados pelo `mise`.
