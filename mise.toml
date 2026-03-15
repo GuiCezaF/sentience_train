@@ -1,0 +1,7 @@
+[tools]
+python = "3.12"
+uv = "latest" # Optional: Recommended for faster venv creation
+
+[settings]
+# Automatically creates and activates .venv when entering directory
+python.uv_venv_auto = "create|source"
