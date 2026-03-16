@@ -69,3 +69,7 @@ The modular entry point for the application and pipelines is the script `src/ind
 - `src/pipeline/`: Orchestration layer for scripts triggered via CLI.
 - `models/`: Persistence location for trained model checkpoints (`.pth`, `.onnx`).
 - `logs/`: Persistent terminal record of train or evaluation sessions.
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
