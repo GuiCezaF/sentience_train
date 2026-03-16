@@ -8,6 +8,8 @@ e este projeto adere ao [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ## [Unreleased]
 
 ### Adicionado
+- Criação e estruturação do `README.md` relatando instruções iniciais e arquitetura de execução do projeto.
+- Criação arquivo descritivo `GITHUB_ABOUT.md` contendo apresentação otimizada e tags de uso para o GitHub.
 - Estrutura inicial do projeto para o módulo de Machine Learning em Python.
 - Arquivo `.gitignore` configurado para ignorar arquivos temporários, de ambiente virtual (como `.venv`) e compilações no Python.
 - Configuração local de dependências com `requirements.txt`.
