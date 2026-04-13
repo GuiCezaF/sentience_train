@@ -57,7 +57,7 @@ def train(epochs_override=None):
 
     model = MiniVGGNet(cfg.NUM_CLASSES).to(cfg.DEVICE)
     class_weights = class_weights.to(cfg.DEVICE)
-    criterion = nn.CrossEntropyLoss(weight=class_weights)
+    criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.LR, weight_decay=cfg.WEIGHT_DECAY)
     epochs = epochs_override if epochs_override is not None else cfg.EPOCHS
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
@@ -70,24 +70,34 @@ def train(epochs_override=None):
     print(f"Treinando por ate {epochs} epochs (patience={cfg.PATIENCE})\n")
 
     epoch_bar = tqdm(range(1, epochs + 1), ncols=90, desc="Epochs")
-    for epoch in epoch_bar:
-        train_loss, train_acc = run_epoch(model, train_loader, criterion, optimizer, scaler, cfg.DEVICE, is_train=True)
-        val_loss, val_acc = run_epoch(model, val_loader, criterion, optimizer, scaler, cfg.DEVICE, is_train=False)
-        scheduler.step()
+    try:
+        for epoch in epoch_bar:
+            train_loss, train_acc = run_epoch(model, train_loader, criterion, optimizer, scaler, cfg.DEVICE, is_train=True)
+            val_loss, val_acc = run_epoch(model, val_loader, criterion, optimizer, scaler, cfg.DEVICE, is_train=False)
+            scheduler.step()
 
-        msg = f"Epoch {epoch:03d} | train_loss={train_loss:.4f} train_acc={train_acc:.4f} | val_loss={val_loss:.4f} val_acc={val_acc:.4f}"
-        logger.info(msg)
-        epoch_bar.set_postfix(val_acc=f"{val_acc:.4f}", val_loss=f"{val_loss:.4f}")
+            epoch_bar.set_postfix(val_acc=f"{val_acc:.4f}", val_loss=f"{val_loss:.4f}")
 
-        if val_acc > best_val_acc:
-            best_val_acc = val_acc
-            patience_counter = 0
-            torch.save({"model_state": model.state_dict(), "val_acc": val_acc, "epoch": epoch}, str(cfg.BEST_MODEL_PATH))
-            tqdm.write(f"  Melhor modelo salvo (val_acc={val_acc:.4f})")
-        else:
-            patience_counter += 1
-            if patience_counter >= cfg.PATIENCE:
-                tqdm.write(f"\nEarly stopping na epoch {epoch}.")
-                break
+            if val_acc > best_val_acc:
+                best_val_acc = val_acc
+                patience_counter = 0
+                torch.save({"model_state": model.state_dict(), "val_acc": val_acc, "epoch": epoch}, str(cfg.BEST_MODEL_PATH))
+                tqdm.write(f"  Melhor modelo salvo (val_acc={val_acc:.4f})")
+            else:
+                patience_counter += 1
+                if patience_counter >= cfg.PATIENCE:
+                    tqdm.write(f"\nEarly stopping na epoch {epoch}.")
+                    logger.info(f"Early stopping acionado (Epoch {epoch}). Melhor val_acc_final={best_val_acc:.4f}")
+                    break
 
-    print(f"\nTreinamento concluido. Melhor val_acc={best_val_acc:.4f}")
+            # Registra no arquivo .log a barra de progresso estática
+            percent = epoch / epochs
+            filled = int(20 * percent)
+            pbar = "=" * filled + "-" * (20 - filled)
+            logger.info(f"Progresso [{pbar}] {epoch:03d}/{epochs:03d} ({(percent*100):.0f}%) | val_acc={val_acc:.4f} val_loss={val_loss:.4f}")
+
+        print(f"\nTreinamento concluido. Melhor val_acc={best_val_acc:.4f}")
+        logger.info(f"Treinamento concluido. val_acc_final={best_val_acc:.4f}")
+    except Exception as e:
+        logger.error(f"Erro catastrofico durante o treinamento: {e}", exc_info=True)
+        raise e

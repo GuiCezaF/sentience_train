@@ -34,5 +34,11 @@ e este projeto adere ao [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - Instalação das dependências gerais do projeto listadas no `requirements.txt`.
 
 ### Corrigido
+- Solução para o colapso do modelo no Edge Impulse: removida a penalidade dupla de pesos em `CrossEntropyLoss` que interagia com `WeightedRandomSampler`, fazendo a rede prever massivamente a minoria (classe disgust).
+- Correção do aviso de segurança no `export.py` ativando `weights_only=True` no carregamento com `torch.load()`.
 - Resolução de conflito de arquitetura e distribuição isolando o ambiente virtual do Python 3.14 global.
 - Correção de erro de ativação de bibliotecas no `.venv\pyvenv.cfg` mapeando os binários diretos instalados pelo `mise`.
+- Otimização do pipeline de log no arquivo de treino reduzindo a verbosidade (tlog de cada epoch) e englobando verificação de erros vitais globais.
+
+### Adicionado
+- Adicionado filtro de data augmentation `ColorJitter` de brilho e contraste nas transformações para aumentar a robustez do formato nativo preto e branco.

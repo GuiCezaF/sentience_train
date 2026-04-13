@@ -13,7 +13,7 @@ from model import MiniVGGNet
 
 
 def _train_fold(model, train_loader, val_loader, class_weights, fold_idx):
-    criterion = nn.CrossEntropyLoss(weight=class_weights.to(cfg.DEVICE))
+    criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.LR, weight_decay=cfg.WEIGHT_DECAY)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.EPOCHS)
     scaler = GradScaler(cfg.DEVICE.type)

@@ -8,7 +8,7 @@ from model import MiniVGGNet
 
 
 def export():
-    checkpoint = torch.load(str(cfg.BEST_MODEL_PATH), map_location="cpu")
+    checkpoint = torch.load(str(cfg.BEST_MODEL_PATH), map_location="cpu", weights_only=True)
     model = MiniVGGNet(cfg.NUM_CLASSES)
     model.load_state_dict(checkpoint["model_state"])
     model.eval()

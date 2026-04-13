@@ -2,6 +2,7 @@ from torchvision import transforms
 
 train_transform = transforms.Compose([
     transforms.Grayscale(num_output_channels=1),
+    transforms.ColorJitter(brightness=0.2, contrast=0.2),
     transforms.RandomHorizontalFlip(),
     transforms.RandomRotation(10),
     transforms.RandomAffine(degrees=0, translate=(0.1, 0.1), shear=5),
