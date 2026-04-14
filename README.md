@@ -1,10 +1,10 @@
 # Sentience - Emotion Recognition (Machine Learning)
 
-Core Artificial Intelligence and Machine Learning module for the **Sentience** project, specialized in recognizing and classifying facial emotions using Deep Learning architectures (like MiniVGGNet). The entire flow is built on PyTorch and has native support for GPU acceleration via CUDA.
+Core Artificial Intelligence and Machine Learning module for the **Sentience** project, specialized in recognizing and classifying facial emotions to measure workplace stress and satisfaction. It uses Deep Learning architectures (like MiniVGGNet) built on PyTorch with native support for GPU acceleration via CUDA.
 
 ## Main Features
 
-- **Classification**: The model can discern between 7 base emotions: `angry`, `disgust`, `fear`, `happy`, `neutral`, `sad`, `surprise`.
+- **Classification**: Specialized in 4 key classes for professional environment monitoring: `angry`, `happy`, `neutral`, `sad`.
 - **Isolation and Control**: Automatic management of environments and dependencies via [mise](https://github.com/jdx/mise), locking the language version to Python 3.12.
 - **Pipeline Modules**: End-to-end independent flows (training on bases and baselines, test set evaluation, 5-fold cross-validation, and metric comparisons).
 - **Fast Deployment**: Automated export of `.pth` models to `.onnx` ready for production applications.
