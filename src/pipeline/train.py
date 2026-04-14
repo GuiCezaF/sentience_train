@@ -66,8 +66,8 @@ def train(epochs_override=None):
     best_val_acc = 0.0
     patience_counter = 0
 
-    print(f"Dispositivo: {cfg.DEVICE}")
-    print(f"Treinando por ate {epochs} epochs (patience={cfg.PATIENCE})\n")
+    print(f"Device: {cfg.DEVICE}")
+    print(f"Training for up to {epochs} epochs (patience={cfg.PATIENCE})\n")
 
     epoch_bar = tqdm(range(1, epochs + 1), ncols=90, desc="Epochs")
     try:
@@ -82,22 +82,22 @@ def train(epochs_override=None):
                 best_val_acc = val_acc
                 patience_counter = 0
                 torch.save({"model_state": model.state_dict(), "val_acc": val_acc, "epoch": epoch}, str(cfg.BEST_MODEL_PATH))
-                tqdm.write(f"  Melhor modelo salvo (val_acc={val_acc:.4f})")
+                tqdm.write(f"  Best model saved (val_acc={val_acc:.4f})")
             else:
                 patience_counter += 1
                 if patience_counter >= cfg.PATIENCE:
-                    tqdm.write(f"\nEarly stopping na epoch {epoch}.")
-                    logger.info(f"Early stopping acionado (Epoch {epoch}). Melhor val_acc_final={best_val_acc:.4f}")
+                    tqdm.write(f"\nEarly stopping at epoch {epoch}.")
+                    logger.info(f"Early stopping triggered (Epoch {epoch}). Best final val_acc={best_val_acc:.4f}")
                     break
 
-            # Registra no arquivo .log a barra de progresso estática
+            # Log the static progress bar to the .log file
             percent = epoch / epochs
             filled = int(20 * percent)
             pbar = "=" * filled + "-" * (20 - filled)
-            logger.info(f"Progresso [{pbar}] {epoch:03d}/{epochs:03d} ({(percent*100):.0f}%) | val_acc={val_acc:.4f} val_loss={val_loss:.4f}")
+            logger.info(f"Progress [{pbar}] {epoch:03d}/{epochs:03d} ({(percent*100):.0f}%) | val_acc={val_acc:.4f} val_loss={val_loss:.4f}")
 
-        print(f"\nTreinamento concluido. Melhor val_acc={best_val_acc:.4f}")
-        logger.info(f"Treinamento concluido. val_acc_final={best_val_acc:.4f}")
+        print(f"\nTraining completed. Best val_acc={best_val_acc:.4f}")
+        logger.info(f"Training completed. final_val_acc={best_val_acc:.4f}")
     except Exception as e:
-        logger.error(f"Erro catastrofico durante o treinamento: {e}", exc_info=True)
+        logger.error(f"Catastrophic error during training: {e}", exc_info=True)
         raise e

@@ -102,6 +102,6 @@ def run_kfold():
         json.dump({"folds": results, "summary": summary}, f, indent=2)
 
     table = [[k, f"{v['mean']:.4f}", f"{v['std']:.4f}"] for k, v in summary.items()]
-    print("\n=== Resultado Cross-Validation (5-Fold) ===")
-    print(tabulate(table, headers=["Metrica", "Media", "Desvio Padrao"], tablefmt="rounded_outline"))
-    print(f"\nResultados salvos em: {out_path}")
+    print("\n=== Cross-Validation Results (5-Fold) ===")
+    print(tabulate(table, headers=["Metric", "Mean", "Std Dev"], tablefmt="rounded_outline"))
+    print(f"\nResults saved at: {out_path}")

@@ -36,10 +36,10 @@ def export():
         torch_out = model(dummy).numpy()
 
     max_diff = float(np.abs(ort_out - torch_out).max())
-    print(f"Exportacao concluida: {cfg.ONNX_PATH}")
+    print(f"Export completed: {cfg.ONNX_PATH}")
     print(f"Max diff ONNX vs PyTorch: {max_diff:.2e}")
 
     if max_diff < 1e-5:
-        print("Validacao PASSOU (diff < 1e-5)")
+        print("Validation PASSED (diff < 1e-5)")
     else:
-        print(f"AVISO: diff={max_diff:.2e} esta acima do limiar 1e-5")
+        print(f"WARNING: diff={max_diff:.2e} is above the 1e-5 threshold")

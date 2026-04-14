@@ -42,7 +42,7 @@ class MiniVGGNet(nn.Module):
 
 
 class BaselineCNN(nn.Module):
-    """CNN simples sem augmentacao nem BatchNorm, usada como referencia."""
+    """Simple CNN without augmentation or BatchNorm, used as a reference."""
     def __init__(self, num_classes=4):
         super().__init__()
         self.features = nn.Sequential(

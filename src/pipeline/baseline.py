@@ -19,7 +19,7 @@ def _load_flat_data(split):
     dataset = ImageFolder(root=str(cfg.DATA_DIR / split), transform=eval_transform)
     loader = DataLoader(dataset, batch_size=256, shuffle=False, num_workers=4)
     X, y = [], []
-    for imgs, labels in tqdm(loader, desc=f"  Carregando {split}", ncols=90, leave=False):
+    for imgs, labels in tqdm(loader, desc=f"  Loading {split}", ncols=90, leave=False):
         X.append(imgs.view(imgs.size(0), -1).numpy())
         y.append(labels.numpy())
     return np.concatenate(X), np.concatenate(y)
@@ -60,11 +60,11 @@ def _train_baseline_cnn(train_loader, val_loader):
 
 
 def run_baseline():
-    print("Carregando dados para baseline...")
+    print("Loading data for baseline...")
     X_train, y_train = _load_flat_data("train")
     X_test, y_test = _load_flat_data("test")
 
-    print("\nTreinando Logistic Regression...")
+    print("\nTraining Logistic Regression...")
     lr_model = LogisticRegression(max_iter=500, n_jobs=-1, C=0.1)
     lr_model.fit(X_train, y_train)
     lr_preds = lr_model.predict(X_test)
@@ -77,7 +77,7 @@ def run_baseline():
     train_loader = DataLoader(train_dataset, batch_size=cfg.BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=True)
     test_loader = DataLoader(test_dataset, batch_size=cfg.BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True)
 
-    print("\nTreinando BaselineCNN...")
+    print("\nTraining BaselineCNN...")
     cnn_model, _ = _train_baseline_cnn(train_loader, test_loader)
     cnn_model.eval()
     all_preds, all_labels = [], []
@@ -101,6 +101,6 @@ def run_baseline():
         ["Logistic Regression", f"{lr_acc:.4f}", f"{lr_f1:.4f}"],
         ["Baseline CNN", f"{cnn_acc:.4f}", f"{cnn_f1:.4f}"],
     ]
-    print("\n=== Resultados Baseline ===")
-    print(tabulate(table, headers=["Modelo", "Accuracy", "F1-macro"], tablefmt="rounded_outline"))
-    print(f"\nResultados salvos em: {out_path}")
+    print("\n=== Baseline Results ===")
+    print(tabulate(table, headers=["Model", "Accuracy", "F1-macro"], tablefmt="rounded_outline"))
+    print(f"\nResults saved at: {out_path}")

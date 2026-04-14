@@ -24,7 +24,7 @@ def evaluate():
 
     all_preds, all_labels = [], []
     with torch.no_grad():
-        for images, labels in tqdm(test_loader, desc="Avaliando", ncols=90):
+        for images, labels in tqdm(test_loader, desc="Evaluating", ncols=90):
             images = images.to(cfg.DEVICE)
             logits = model(images)
             all_preds.extend(logits.argmax(1).cpu().numpy())
@@ -46,22 +46,22 @@ def evaluate():
         ["F1 (macro)", f"{f1_macro:.4f}"],
         ["F1 (weighted)", f"{f1_weighted:.4f}"],
     ]
-    print("\n=== Metricas Gerais ===")
-    print(tabulate(summary, headers=["Metrica", "Valor"], tablefmt="rounded_outline"))
+    print("\n=== General Metrics ===")
+    print(tabulate(summary, headers=["Metric", "Value"], tablefmt="rounded_outline"))
 
-    print("\n=== Relatorio por Classe ===")
+    print("\n=== Class Report ===")
     print(classification_report(all_labels, all_preds, target_names=cfg.CLASS_NAMES, zero_division=0))
 
     cm = confusion_matrix(all_labels, all_preds)
     fig, ax = plt.subplots(figsize=(9, 7))
     sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", xticklabels=cfg.CLASS_NAMES, yticklabels=cfg.CLASS_NAMES, ax=ax)
-    ax.set_xlabel("Predito")
-    ax.set_ylabel("Real")
-    ax.set_title("Matriz de Confusao")
+    ax.set_xlabel("Predicted")
+    ax.set_ylabel("Actual")
+    ax.set_title("Confusion Matrix")
     fig.tight_layout()
     out_path = str(cfg.LOGS_DIR / "confusion_matrix.png")
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
-    print(f"\nMatriz de confusao salva em: {out_path}")
+    print(f"\nConfusion matrix saved at: {out_path}")
 
     return {"accuracy": acc, "f1_macro": f1_macro, "precision_macro": prec_macro, "recall_macro": rec_macro, "f1_weighted": f1_weighted}

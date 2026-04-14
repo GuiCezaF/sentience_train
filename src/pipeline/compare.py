@@ -9,10 +9,10 @@ import config as cfg
 def run_compare():
     baseline_path = cfg.LOGS_DIR / "baseline_results.json"
     if not baseline_path.exists():
-        print("ERRO: execute 'baseline' primeiro para gerar baseline_results.json")
+        print("ERROR: run 'baseline' first to generate baseline_results.json")
         return
     if not cfg.BEST_MODEL_PATH.exists():
-        print("ERRO: execute 'train' e 'evaluate' antes de comparar.")
+        print("ERROR: run 'train' and 'evaluate' before comparing.")
         return
 
     with open(str(baseline_path)) as f:
@@ -31,7 +31,7 @@ def run_compare():
         "Baseline CNN": baselines["baseline_cnn"],
     }
     if main_acc is not None:
-        models["MiniVGGNet (CV media)"] = {"accuracy": main_acc, "f1_macro": main_f1}
+        models["MiniVGGNet (CV mean)"] = {"accuracy": main_acc, "f1_macro": main_f1}
 
     names = list(models.keys())
     accs = [v["accuracy"] for v in models.values()]
@@ -48,7 +48,7 @@ def run_compare():
     ax.set_xticklabels(names, rotation=15, ha="right")
     ax.set_ylim(0, 1.08)
     ax.set_ylabel("Score")
-    ax.set_title("Comparacao de Modelos — FER 2023")
+    ax.set_title("Model Comparison — FER 2023")
     ax.legend()
     fig.tight_layout()
     out_path = str(cfg.LOGS_DIR / "comparison.png")
@@ -56,6 +56,6 @@ def run_compare():
     plt.close(fig)
 
     table = [[name, f"{v['accuracy']:.4f}", f"{v['f1_macro']:.4f}"] for name, v in models.items()]
-    print("\n=== Comparacao de Modelos ===")
-    print(tabulate(table, headers=["Modelo", "Accuracy", "F1-macro"], tablefmt="rounded_outline"))
-    print(f"\nGrafico salvo em: {out_path}")
+    print("\n=== Model Comparison ===")
+    print(tabulate(table, headers=["Model", "Accuracy", "F1-macro"], tablefmt="rounded_outline"))
+    print(f"\nGraph saved at: {out_path}")
