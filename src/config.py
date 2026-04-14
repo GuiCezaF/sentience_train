@@ -15,8 +15,8 @@ LOGS_DIR.mkdir(exist_ok=True)
 
 IMG_SIZE = 48
 CHANNELS = 1
-NUM_CLASSES = 7
-CLASS_NAMES = ["angry", "disgust", "fear", "happy", "neutral", "sad", "surprise"]
+NUM_CLASSES = 4
+CLASS_NAMES = ["angry", "happy", "neutral", "sad"]
 
 BATCH_SIZE = 128
 LR = 1e-3

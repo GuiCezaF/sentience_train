@@ -21,7 +21,7 @@ class ConvBlock(nn.Module):
 
 
 class MiniVGGNet(nn.Module):
-    def __init__(self, num_classes=7):
+    def __init__(self, num_classes=4):
         super().__init__()
         self.features = nn.Sequential(
             ConvBlock(1, 32),   # 48 -> 24
@@ -43,7 +43,7 @@ class MiniVGGNet(nn.Module):
 
 class BaselineCNN(nn.Module):
     """CNN simples sem augmentacao nem BatchNorm, usada como referencia."""
-    def __init__(self, num_classes=7):
+    def __init__(self, num_classes=4):
         super().__init__()
         self.features = nn.Sequential(
             nn.Conv2d(1, 32, 3, padding=1), nn.ReLU(inplace=True), nn.MaxPool2d(2),

@@ -5,7 +5,7 @@ Todas as modificações notáveis neste projeto serão documentadas neste arquiv
 O formato é baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.0.0/),
 e este projeto adere ao [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.0.0] - 2026-04-14
 
 ### Adicionado
 - Arquivo `LICENSE` com a definição da licença open-source MIT para o projeto.
@@ -42,3 +42,6 @@ e este projeto adere ao [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Adicionado
 - Adicionado filtro de data augmentation `ColorJitter` de brilho e contraste nas transformações para aumentar a robustez do formato nativo preto e branco.
+
+### Removido
+- Removidas as classes `disgust`, `surprise` e `fear` do dataset e das configurações do modelo (`num_classes` ajustado de 7 para 4) para focar na medição de estresse e satisfação.

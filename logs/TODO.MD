@@ -1,1 +1,0 @@
-TODO(Guilherme): Logar apenas erros e finais de treinamentos
