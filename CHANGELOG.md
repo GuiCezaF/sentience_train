@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.3] - 2026-04-15
+
+### Added
+- `build_evaluation_metrics_document` in `src/evaluation/metrics_schema.py` (and export in `evaluation.__init__`) to build version-6 metrics JSON from labels, predicted classes, and probability scores (`log_loss`, multiclass ROC AUC OvR, subgroup layout aligned with validation).
+- `tests/_prediction_capture.py` to collect test-set predictions from `MiniVGGNet` when `models/best_model.pth` and `dataset/test` exist, with a deterministic synthetic fallback if PyTorch, data, or checkpoint are unavailable.
+- `pytest.ini`: `tests` on `pythonpath` so test helpers import cleanly.
+
+### Changed
+- `tests/test_evaluation_metrics.py`: session-scoped fixture builds metrics at test time, writes `reports/evaluation_metrics.generated.json` and `reports/evaluation_run_meta.txt`, and no longer reads `tests/fixtures/model_44_evaluation_metrics.json`.
+- `tests/conftest.py`: Markdown report uses only `reports/evaluation_metrics.generated.json` (plus `evaluation_run_meta.txt` when present) for the metrics section; no fallback to external JSON at the repository root.
+- `test_wrong_version_is_rejected` assertion aligned with English validation messages from `validate_evaluation_metrics`.
+- Tests and evaluation helpers: user-facing Markdown, module docstrings, comments, and test identifiers in English (`tests/conftest.py`, `tests/test_evaluation_metrics.py`, `tests/_prediction_capture.py`, `src/evaluation/metrics_schema.py`); session metadata key `prediction_source` replaces `fonte_predicoes`.
+
+### Fixed
+- Sklearn `UserWarning` (“y_prob values do not sum to one”) when calling `log_loss` on float32 softmax outputs: `build_evaluation_metrics_document` now renormalizes probability rows to sum to 1 in float64 before `log_loss` / `roc_auc_score`.
+
 ## [1.0.1] - 2026-04-14
 
 - Translate entire Python codebase to English
