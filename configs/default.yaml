@@ -2,7 +2,7 @@ data:
   csv_path: ../dataset/fer2013.csv
   classes: [angry, happy, neutral, sad]
 model:
-  name: minivgg
+  name: ds_cnn_w025
   num_classes: 4
 training:
   batch_size: 128

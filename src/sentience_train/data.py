@@ -67,6 +67,11 @@ class FER2013Dataset(Dataset[tuple[torch.Tensor, int]]):
     def __len__(self) -> int:
         return len(self._records)
 
+    @property
+    def records(self) -> tuple[Record, ...]:
+        """Validated Training records, exposed for deterministic calibration only."""
+        return self._records
+
     def __getitem__(self, index: int) -> tuple[torch.Tensor, int]:
         record = self._records[index]
         with self._csv_path.open("rb") as handle:

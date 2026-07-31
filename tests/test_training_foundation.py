@@ -14,7 +14,7 @@ from sentience_train.data import DataValidationError, load_training_data
 def _config(tmp_path: Path, csv_path: Path) -> Path:
     document = {
         "data": {"csv_path": csv_path.name, "classes": ["angry", "happy", "neutral", "sad"]},
-        "model": {"name": "minivgg", "num_classes": 4},
+        "model": {"name": "ds_cnn_w025", "num_classes": 4},
         "training": {"batch_size": 4, "epochs": 1, "seed": 42, "device": "cpu", "num_workers": 0, "scheduler": "cosine"},
         "optimizer": {"name": "adamw", "lr": 0.001, "weight_decay": 0.0001},
         "early_stopping": {"patience": 1, "min_delta": 0.002},

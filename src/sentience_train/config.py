@@ -24,7 +24,7 @@ class DataConfig:
 
 @dataclass(frozen=True)
 class ModelConfig:
-    name: str = "minivgg"
+    name: str = "ds_cnn_w025"
     num_classes: int = 4
 
 
@@ -186,8 +186,11 @@ def load_config(path: str | Path, overrides: Mapping[str, Any] | None = None) ->
 
     model = document["model"]
     name = _str(model["name"], "model.name")
-    if name != "minivgg":
-        raise ConfigError(f"model.name must be 'minivgg', received {name!r}")
+    supported_models = {"ds_cnn_w025", "ds_cnn_w035", "ds_cnn_w050"}
+    if name not in supported_models:
+        raise ConfigError(
+            f"model.name must be one of {sorted(supported_models)!r}, received {name!r}"
+        )
     num_classes = _int(model["num_classes"], "model.num_classes", 1)
     if num_classes != len(LABELS):
         raise ConfigError(f"model.num_classes must be {len(LABELS)}, received {num_classes}")

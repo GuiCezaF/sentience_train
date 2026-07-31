@@ -21,6 +21,7 @@ from .artifacts import RunStaging, append_jsonl, git_state, sha256_file, utc_now
 from .config import AppConfig, LABELS, ModelConfig
 from .data import TrainingData, load_training_data
 from .models import build_model
+from .preflight import PreflightFailed, run_preflight
 
 
 @dataclass(frozen=True)
@@ -97,9 +98,9 @@ def _validate(model: nn.Module, loader: DataLoader, criterion: nn.Module, device
     return total_loss / total, float(f1_score(actual, predicted, labels=list(range(4)), average="macro", zero_division=0)), predicted
 
 
-def _manifest(config: AppConfig, data: TrainingData, weights: torch.Tensor, staging: RunStaging, status: str, device: torch.device, artifacts: dict[str, str]) -> dict:
+def _manifest(config: AppConfig, data: TrainingData, weights: torch.Tensor, staging: RunStaging, status: str, device: torch.device, artifacts: dict[str, str], preflight_failure: dict | None = None) -> dict:
     lock = config.source_path.parent.parent / "uv.lock"
-    return {
+    document = {
         "status": status,
         "run_id": staging.run_id,
         "created_at": utc_now(),
@@ -115,9 +116,20 @@ def _manifest(config: AppConfig, data: TrainingData, weights: torch.Tensor, stag
         "device": str(device),
         "artifacts": artifacts,
     }
+    if preflight_failure is not None:
+        document["preflight_failure"] = preflight_failure
+    return document
 
 
-def run_training(config: AppConfig, model_factory: Callable[[ModelConfig], nn.Module] = build_model) -> CompletedRun:
+def _artifact_hashes(directory: Path) -> dict[str, str]:
+    return {str(path.relative_to(directory)): sha256_file(path) for path in sorted(directory.rglob("*")) if path.is_file() and path.name != "manifest.json"}
+
+
+def run_training(
+    config: AppConfig,
+    model_factory: Callable[[ModelConfig], nn.Module] = build_model,
+    preflight_runner: Callable[[AppConfig, TrainingData, Path], dict] = run_preflight,
+) -> CompletedRun:
     """Run a fully deterministic FP32 train/PublicTest-only optimization."""
     seed_everything(config.training.seed)
     device = _device(config.training.device)
@@ -127,6 +139,8 @@ def run_training(config: AppConfig, model_factory: Callable[[ModelConfig], nn.Mo
     log_path = staging.staging / "logs" / "train.jsonl"
     append_jsonl(log_path, {"event": "run_started", "run_id": staging.run_id})
     try:
+        preflight = preflight_runner(config, data, staging.staging / "preflight")
+        append_jsonl(log_path, {"event": "preflight_passed", "report": "preflight/report.json", "candidates": len(preflight["candidates"])})
         model = model_factory(config.model).to(device)
         weights = _class_weights(data.train_labels)
         criterion = nn.CrossEntropyLoss(weight=weights.to(device))
@@ -172,11 +186,23 @@ def run_training(config: AppConfig, model_factory: Callable[[ModelConfig], nn.Mo
         validation_path = staging.staging / "metrics" / "validation.json"
         validation_path.write_text(json.dumps(validation, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         append_jsonl(log_path, {"event": "run_completed", "best_epoch": best_epoch, "macro_f1": best_f1, "validation_loss": best_loss})
-        artifacts = {str(path.relative_to(staging.staging)): sha256_file(path) for path in sorted(staging.staging.rglob("*")) if path.is_file()}
+        artifacts = _artifact_hashes(staging.staging)
         staging.write_manifest(_manifest(config, data, weights, staging, "completed", device, artifacts))
         directory = staging.finalize()
         return CompletedRun(staging.run_id, directory, best_epoch, best_f1, best_loss)
+    except PreflightFailed as exc:
+        append_jsonl(log_path, {"event": "preflight_failed", "report": str(exc.report_directory / "report.json")})
+        artifacts = _artifact_hashes(staging.staging)
+        report = json.loads((exc.report_directory / "report.json").read_text(encoding="utf-8"))
+        failed = next((candidate for candidate in report.get("candidates", []) if candidate.get("status") == "failed"), report.get("calibration", {}))
+        failure = {key: failed[key] for key in ("name", "failed_stage", "observed", "limit", "error") if key in failed}
+        staging.write_manifest(_manifest(config, data, torch.ones(4), staging, "preflight_failed", device, artifacts, failure))
+        directory = staging.finalize()
+        exc.relocate(directory / "preflight")
+        raise
     except Exception as exc:
         append_jsonl(log_path, {"event": "run_failed", "error": type(exc).__name__, "message": str(exc)})
-        staging.write_manifest(_manifest(config, data, torch.ones(4), staging, "failed", device, {}))
+        artifacts = _artifact_hashes(staging.staging)
+        staging.write_manifest(_manifest(config, data, torch.ones(4), staging, "failed", device, artifacts))
+        staging.finalize()
         raise
