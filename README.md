@@ -32,14 +32,17 @@ The public workflow is explicit and run-based:
 
 ```bash
 sentience-train train --config configs/default.yaml
-sentience-train export --run-id <run-id> --format onnx
+sentience-train export --run-id <run-id>
+sentience-train export --run-id <run-id> --format onnx --runs-dir ./runs
 sentience-train export --run-id <run-id> --format tflite --runs-dir ./runs
 ```
 
-`--format` is required and issue #5 accepts only `onnx` or `tflite`. `all` and
-any access to `PrivateTest` are reserved for issue #6. Bundles are published
-under `exports/<run-id>/<format>/`, atomically, and reused only when their
-identity and every payload hash match.
+`--format all` is the default release flow. `onnx` and `tflite` are immutable
+development exports and consume only `PublicTest`; they never create a
+PrivateTest ledger. The complete bundle is published under
+`exports/<run-id>/all/` and is reused only when its candidate identity and every
+payload hash match. A final release always has status `accepted` or `failed`
+and the frozen run remains untouched.
 
 ## Project Structure
 
@@ -48,7 +51,9 @@ identity and every payload hash match.
 - `src/model/`: Classes containing the semantic structure of Neural Network weights.
 - `src/pipeline/`: Orchestration layer for scripts triggered via CLI.
 - `runs/`: Immutable frozen training runs, including indexed `PublicTest` records.
-- `exports/`: Atomic ONNX or copied INT8 TFLite development bundles.
+- `exports/`: Atomic development bundles and complete release bundles with the
+  permanent PrivateTest access ledger
+- `docs/deterministic-release.md`: deterministic release and retry rules
 - `logs/`: Persistent terminal record of train or evaluation sessions.
 
 ## License

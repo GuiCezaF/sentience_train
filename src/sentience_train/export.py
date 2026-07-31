@@ -36,6 +36,9 @@ from .selection import Metrics, metrics_from_predictions
 
 
 EXPORT_SCHEMA = "development-export-bundle/v1"
+RELEASE_SCHEMA = "release-bundle/v1"
+ACCESS_SCHEMA = "private-test-access/v1"
+RELEASE_METRICS_SCHEMA = "release-metrics/v1"
 RUN_SCHEMA = "frozen-run/v1"
 INDEX_SCHEMA = "public-test-index/v1"
 EXPORTER_REVISION = "issue-5-development-export-v1"
@@ -88,6 +91,8 @@ class ExportResult:
     directory: Path
     reused: bool
     identity: str
+    status: str = "development"
+    test_accessed: bool = False
 
 
 def _json(path: Path) -> dict[str, Any]:
@@ -835,7 +840,7 @@ def _publish(stage: Path, destination: Path, identity: str) -> bool:
     return False
 
 
-def export_development(run_id: str, format: str, runs_root: Path = Path("runs"), exports_root: Path = Path("exports")) -> ExportResult:
+def _export_development_bundle(run_id: str, format: str, runs_root: Path = Path("runs"), exports_root: Path = Path("exports")) -> ExportResult:
     """Create or reuse one immutable ONNX or TFLite development bundle."""
     if format not in {"onnx", "tflite"}:
         raise ExportInputError("format must be exactly 'onnx' or 'tflite'")
@@ -881,3 +886,26 @@ def export_development(run_id: str, format: str, runs_root: Path = Path("runs"),
     except Exception as exc:
         shutil.rmtree(stage, ignore_errors=True)
         raise ExportValidationError(f"{format} export failed: {exc}") from exc
+
+
+def export_frozen_run(
+    run_id: str,
+    format: str = "all",
+    runs_root: Path = Path("runs"),
+    exports_root: Path = Path("exports"),
+) -> ExportResult:
+    """Export a frozen run through the single public development/release seam."""
+    if format in {"onnx", "tflite"}:
+        return _export_development_bundle(run_id, format, runs_root=runs_root, exports_root=exports_root)
+    if format != "all":
+        raise ExportInputError("format must be exactly 'all', 'onnx', or 'tflite'")
+    from ._release import release_frozen_run
+
+    return release_frozen_run(run_id, runs_root=Path(runs_root), exports_root=Path(exports_root))
+
+
+def export_development(run_id: str, format: str, runs_root: Path = Path("runs"), exports_root: Path = Path("exports")) -> ExportResult:
+    """Compatibility wrapper for the PublicTest-only development formats."""
+    if format not in {"onnx", "tflite"}:
+        raise ExportInputError("format must be exactly 'onnx' or 'tflite'")
+    return export_frozen_run(run_id, format, runs_root=runs_root, exports_root=exports_root)

@@ -18,6 +18,7 @@ sentience-train = "sentience_train.cli:main"
 [dependency-groups]
 dev = ["pytest>=8.0"]
 export = [
+  "matplotlib>=3.8",
   "onnx>=1.15",
   "onnxruntime>=1.17",
   "litert-torch==0.9.2",
@@ -34,4 +35,5 @@ packages = ["src/sentience_train"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["acceptance: uses a real canonical frozen run when configured"]
 pythonpath = ["src", "tests"]

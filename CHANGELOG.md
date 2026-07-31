@@ -4,6 +4,10 @@
 
 - Add immutable development ONNX and TFLite bundles for frozen runs, with
   PublicTest-only parity validation, atomic publication, and hash-checked reuse.
+- Add the complete `all` release bundle with versioned manifests, deterministic
+  PublicTest/PrivateTest evidence, resource gates, and a permanent access ledger.
+- Add Matplotlib/Agg to the export dependency group for deterministic confusion
+  matrix rendering.
 - Add ONNX and ONNX Runtime to the `export` dependency group.
 
 All notable changes to this project will be documented in this file.

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sentience.invalid/schemas/release-metrics-v1.json",
+  "title": "Sentience final PrivateTest metrics",
+  "type": "object",
+  "required": ["schema", "partition", "accessed", "reference", "tflite"],
+  "properties": {
+    "schema": {"const": "release-metrics/v1"},
+    "partition": {"const": "PrivateTest"},
+    "accessed": {"type": "boolean"},
+    "reference": {"type": ["object", "null"]},
+    "tflite": {"type": ["object", "null"]}
+  }
+}

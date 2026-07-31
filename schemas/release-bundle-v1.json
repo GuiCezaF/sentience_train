@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sentience.invalid/schemas/release-bundle-v1.json",
+  "title": "Sentience complete release bundle",
+  "type": "object",
+  "required": ["schema", "format", "status", "run_id", "candidate_identity", "payloads", "manifest_sha256"],
+  "properties": {
+    "schema": {"const": "release-bundle/v1"},
+    "format": {"const": "all"},
+    "status": {"enum": ["accepted", "failed"]},
+    "run_id": {"type": "string"},
+    "candidate_identity": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "payloads": {"type": "object", "additionalProperties": {"type": "object", "required": ["sha256", "bytes"]}},
+    "manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}
