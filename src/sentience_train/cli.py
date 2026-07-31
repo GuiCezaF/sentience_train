@@ -8,6 +8,14 @@ import sys
 from .config import ConfigError, load_config
 from .data import DataValidationError
 from .engine import run_training
+from .selection import SelectionFailed
+
+
+def _epochs(value: str) -> int:
+    parsed = int(value)
+    if not 1 <= parsed <= 100:
+        raise argparse.ArgumentTypeError("--epochs must be between 1 and 100")
+    return parsed
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -15,8 +23,7 @@ def _parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     train = subparsers.add_parser("train")
     train.add_argument("--config", required=True)
-    train.add_argument("--epochs", type=int)
-    train.add_argument("--seed", type=int)
+    train.add_argument("--epochs", type=_epochs)
     train.add_argument("--device", choices=("auto", "cpu", "cuda"))
     return parser
 
@@ -30,6 +37,9 @@ def main(argv: list[str] | None = None) -> int:
     except (ConfigError, DataValidationError) as exc:
         print(f"configuration/data error: {exc}", file=sys.stderr)
         return 2
+    except SelectionFailed as exc:
+        print(f"selection failed; immutable diagnosis: {exc.diagnosis}", file=sys.stderr)
+        return 1
     except Exception as exc:
         print(f"execution error: {exc}", file=sys.stderr)
         return 1

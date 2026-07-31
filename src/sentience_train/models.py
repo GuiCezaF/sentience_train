@@ -31,9 +31,26 @@ DSCNN_BASELINES: tuple[DSCNNBaseline, ...] = (
 _BY_NAME = {candidate.name: candidate for candidate in DSCNN_BASELINES}
 
 
+def make_divisible(value: float, divisor: int = 8, min_ratio: float = 0.9) -> int:
+    """Return MobileNet's standard channel-width rounding.
+
+    MobileNet does not blindly ceil a scaled channel count.  It rounds to the
+    nearest divisor and only moves up when that would shrink the requested
+    width by more than ten percent.  The distinction matters for the 0.35
+    candidate (179.2 becomes 176, not 184) and keeps the checked-in structural
+    baselines reproducible.
+    """
+    if divisor <= 0:
+        raise ValueError("divisor must be positive")
+    rounded = max(divisor, int(value + divisor / 2) // divisor * divisor)
+    if rounded < min_ratio * value:
+        rounded += divisor
+    return int(rounded)
+
+
 def _channels(value: int, width: float) -> int:
-    """Scale a MobileNet channel count and round up to a multiple of eight."""
-    return max(8, ((int(value * width) + 7) // 8) * 8)
+    """Scale a MobileNet channel count with the canonical make-divisible rule."""
+    return make_divisible(value * width)
 
 
 class _ConvBNReLU6(nn.Sequential):
@@ -112,4 +129,55 @@ def build_candidate(name: str, num_classes: int = 4) -> DSCNN:
 
 
 def build_model(config: ModelConfig) -> nn.Module:
+    # This compatibility entry point is used by the issue-#3 fixtures.  The
+    # release-selection engine calls ``build_candidate`` with its fixed width
+    # policy and never reads ModelConfig.name.
+    if config.name is None:
+        return build_candidate("ds_cnn_w025", config.num_classes)
     return build_candidate(config.name, config.num_classes)
+
+
+class _TeacherConvBlock(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int) -> None:
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, 3, padding=1),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_channels, out_channels, 3, padding=1),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2, 2),
+            nn.Dropout2d(0.25),
+        )
+
+    def forward(self, value: torch.Tensor) -> torch.Tensor:
+        return self.block(value)
+
+
+class _MiniVGGTeacher(nn.Module):
+    """Internal, non-deployable contingency teacher."""
+
+    def __init__(self, num_classes: int = 4) -> None:
+        super().__init__()
+        self.features = nn.Sequential(
+            _TeacherConvBlock(1, 32),
+            _TeacherConvBlock(32, 64),
+            _TeacherConvBlock(64, 128),
+        )
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(128 * 6 * 6, 512),
+            nn.BatchNorm1d(512),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.5),
+            nn.Linear(512, num_classes),
+        )
+
+    def forward(self, value: torch.Tensor) -> torch.Tensor:
+        return self.classifier(self.features(value))
+
+
+def build_teacher(num_classes: int = 4) -> nn.Module:
+    """Build the private MiniVGG contingency without exposing it as a candidate."""
+    return _MiniVGGTeacher(num_classes)

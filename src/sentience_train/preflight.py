@@ -242,6 +242,45 @@ class _DefaultToolchain:
         except Exception as exc:
             raise PreflightError("litert_inference", str(exc)) from exc
 
+    def predict_litert(self, flatbuffer: Path, loader: Any) -> dict[str, Any]:
+        """Evaluate only the supplied Training/PublicTest-derived loader.
+
+        The loader is deliberately the argument boundary: this method has no
+        dataset or CSV access and therefore cannot accidentally construct or
+        iterate the reserved PrivateTest partition.
+        """
+        try:
+            from ai_edge_litert.interpreter import Interpreter  # type: ignore[import-not-found]
+            interpreter = Interpreter(model_path=str(flatbuffer))
+            interpreter.allocate_tensors()
+            input_detail = interpreter.get_input_details()[0]
+            output_detail = interpreter.get_output_details()[0]
+            input_scale, input_zero = input_detail["quantization"]
+            output_scale, output_zero = output_detail.get("quantization", (1.0, 0))
+            if not input_scale:
+                raise ValueError("input tensor is not quantized")
+            y_true: list[int] = []
+            y_pred: list[int] = []
+            y_score: list[np.ndarray] = []
+            for images, labels in loader:
+                for image, label in zip(images, labels):
+                    nhwc = image.detach().cpu().numpy().transpose(1, 2, 0)[None, ...]
+                    quantized = np.clip(np.rint(nhwc / input_scale + input_zero), -128, 127).astype(np.int8)
+                    interpreter.set_tensor(input_detail["index"], quantized)
+                    interpreter.invoke()
+                    output = interpreter.get_tensor(output_detail["index"])[0].astype(np.float32)
+                    output = (output - output_zero) * float(output_scale or 1.0)
+                    output = output - output.max()
+                    probabilities = np.exp(output) / np.maximum(np.exp(output).sum(), 1e-15)
+                    y_true.append(int(label))
+                    y_pred.append(int(np.argmax(output)))
+                    y_score.append(probabilities)
+            return {"y_true": y_true, "y_pred": y_pred, "y_score": np.asarray(y_score), "partition": "PublicTest"}
+        except PreflightError:
+            raise
+        except Exception as exc:
+            raise PreflightError("evaluation", str(exc)) from exc
+
     def probe_tflm(self, flatbuffer: Path, operators: Sequence[Operator], working_directory: Path) -> Arena:
         try:
             subprocess.run(["docker", "info"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)

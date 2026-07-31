@@ -2,15 +2,38 @@ data:
   csv_path: ../dataset/fer2013.csv
   classes: [angry, happy, neutral, sad]
 model:
-  name: ds_cnn_w025
   num_classes: 4
 training:
   batch_size: 128
   epochs: 100
-  seed: 42
   device: auto
   num_workers: 0
   scheduler: cosine
+selection:
+  widths: [0.25, 0.35, 0.50]
+  seeds: [42, 43, 44]
+  representative: median_int8_macro_f1_then_lowest_seed
+quality_gates:
+  accuracy: 0.70
+  macro_f1: 0.65
+  recall: 0.55
+  max_accuracy_delta: 0.02
+  tflite_bytes: 1048576
+  arena_with_margin_bytes: 1572864
+  macs: 15000000
+quantization:
+  calibration_seed: 42
+  calibration_examples: 512
+  qat:
+    enabled: true
+    epochs: 20
+    lr: 0.00001
+distillation:
+  enabled: true
+  teacher_seed: 42
+  temperature: 4.0
+  ce_weight: 0.5
+  kl_weight: 0.5
 optimizer:
   name: adamw
   lr: 0.001

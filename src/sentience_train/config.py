@@ -1,4 +1,4 @@
-"""Strict, immutable configuration loading for the training foundation."""
+"""Strict, immutable configuration loading for reproducible selection."""
 
 from __future__ import annotations
 
@@ -10,6 +10,8 @@ import yaml
 
 
 LABELS = ("angry", "happy", "neutral", "sad")
+WIDTHS = (0.25, 0.35, 0.50)
+SEEDS = (42, 43, 44)
 
 
 class ConfigError(ValueError):
@@ -24,18 +26,62 @@ class DataConfig:
 
 @dataclass(frozen=True)
 class ModelConfig:
-    name: str = "ds_cnn_w025"
     num_classes: int = 4
+    # Kept only to read issue-#3 fixtures.  It is deliberately omitted from
+    # resolved configuration and is never consulted by the new orchestrator.
+    name: str | None = None
 
 
 @dataclass(frozen=True)
 class TrainingConfig:
     batch_size: int = 128
     epochs: int = 100
-    seed: int = 42
     device: str = "auto"
     num_workers: int = 0
     scheduler: str = "cosine"
+    # Deprecated compatibility input; public selection always uses SEEDS.
+    seed: int | None = None
+
+
+@dataclass(frozen=True)
+class SelectionConfig:
+    widths: tuple[float, ...] = WIDTHS
+    seeds: tuple[int, ...] = SEEDS
+    representative: str = "median_int8_macro_f1_then_lowest_seed"
+
+
+@dataclass(frozen=True)
+class QualityGatesConfig:
+    accuracy: float = 0.70
+    macro_f1: float = 0.65
+    recall: float = 0.55
+    max_accuracy_delta: float = 0.02
+    tflite_bytes: int = 1_048_576
+    arena_with_margin_bytes: int = 1_572_864
+    macs: int = 15_000_000
+
+
+@dataclass(frozen=True)
+class QATConfig:
+    enabled: bool = True
+    epochs: int = 20
+    lr: float = 1e-5
+
+
+@dataclass(frozen=True)
+class QuantizationConfig:
+    calibration_seed: int = 42
+    calibration_examples: int = 512
+    qat: QATConfig = QATConfig()
+
+
+@dataclass(frozen=True)
+class DistillationConfig:
+    enabled: bool = True
+    teacher_seed: int = 42
+    temperature: float = 4.0
+    ce_weight: float = 0.5
+    kl_weight: float = 0.5
 
 
 @dataclass(frozen=True)
@@ -72,23 +118,40 @@ class AppConfig:
     data: DataConfig
     model: ModelConfig
     training: TrainingConfig
+    selection: SelectionConfig
+    quality_gates: QualityGatesConfig
+    quantization: QuantizationConfig
+    distillation: DistillationConfig
     optimizer: OptimizerConfig
     early_stopping: EarlyStoppingConfig
     augmentation: AugmentationConfig
     run: RunConfig
     source_path: Path
+    legacy_mode: bool = False
 
     def resolved_dict(self) -> dict[str, Any]:
+        """Serialize the effective public policy, excluding legacy aliases."""
         value = asdict(self)
-        value.pop("source_path")
+        value.pop("source_path", None)
+        value.pop("legacy_mode", None)
+        value["model"].pop("name", None)
+        value["training"].pop("seed", None)
         return _paths_to_strings(value)
 
 
 _SCHEMA: dict[str, set[str]] = {
-    "root": {"data", "model", "training", "optimizer", "early_stopping", "augmentation", "run"},
+    "root": {
+        "data", "model", "training", "selection", "quality_gates", "quantization",
+        "distillation", "optimizer", "early_stopping", "augmentation", "run",
+    },
     "data": {"csv_path", "classes"},
     "model": {"name", "num_classes"},
     "training": {"batch_size", "epochs", "seed", "device", "num_workers", "scheduler"},
+    "selection": {"widths", "seeds", "representative"},
+    "quality_gates": {"accuracy", "macro_f1", "recall", "max_accuracy_delta", "tflite_bytes", "arena_with_margin_bytes", "macs"},
+    "quantization": {"calibration_seed", "calibration_examples", "qat"},
+    "qat": {"enabled", "epochs", "lr"},
+    "distillation": {"enabled", "teacher_seed", "temperature", "ce_weight", "kl_weight"},
     "optimizer": {"name", "lr", "weight_decay"},
     "early_stopping": {"patience", "min_delta"},
     "augmentation": {"horizontal_flip_probability", "rotation_degrees", "translate_fraction", "scale_min", "scale_max", "brightness", "contrast"},
@@ -100,9 +163,9 @@ def _paths_to_strings(value: Any) -> Any:
     if isinstance(value, Path):
         return str(value)
     if isinstance(value, dict):
-        return {k: _paths_to_strings(v) for k, v in value.items()}
+        return {key: _paths_to_strings(item) for key, item in value.items()}
     if isinstance(value, tuple):
-        return list(value)
+        return [_paths_to_strings(item) for item in value]
     return value
 
 
@@ -112,27 +175,18 @@ def _mapping(value: Any, where: str) -> dict[str, Any]:
     return value
 
 
-def _strict_keys(value: Mapping[str, Any], section: str) -> None:
+def _strict_keys(value: Mapping[str, Any], section: str, *, required: set[str] | None = None) -> None:
     unknown = set(value) - _SCHEMA[section]
-    missing = _SCHEMA[section] - set(value)
+    missing = (required or set()) - set(value)
     if unknown:
         raise ConfigError(f"{section}: unknown key(s): {', '.join(sorted(unknown))}")
     if missing:
         raise ConfigError(f"{section}: missing key(s): {', '.join(sorted(missing))}")
 
 
-def _int(value: Any, where: str, minimum: int | None = None) -> int:
+def _int(value: Any, where: str, minimum: int | None = None, maximum: int | None = None) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ConfigError(f"{where} must be an integer, received {value!r}")
-    if minimum is not None and value < minimum:
-        raise ConfigError(f"{where} must be >= {minimum}, received {value!r}")
-    return value
-
-
-def _float(value: Any, where: str, minimum: float | None = None, maximum: float | None = None) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ConfigError(f"{where} must be a number, received {value!r}")
-    value = float(value)
     if minimum is not None and value < minimum:
         raise ConfigError(f"{where} must be >= {minimum}, received {value!r}")
     if maximum is not None and value > maximum:
@@ -140,9 +194,26 @@ def _float(value: Any, where: str, minimum: float | None = None, maximum: float 
     return value
 
 
+def _float(value: Any, where: str, minimum: float | None = None, maximum: float | None = None) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ConfigError(f"{where} must be a number, received {value!r}")
+    converted = float(value)
+    if minimum is not None and converted < minimum:
+        raise ConfigError(f"{where} must be >= {minimum}, received {value!r}")
+    if maximum is not None and converted > maximum:
+        raise ConfigError(f"{where} must be <= {maximum}, received {value!r}")
+    return converted
+
+
 def _str(value: Any, where: str) -> str:
     if not isinstance(value, str):
         raise ConfigError(f"{where} must be a string, received {value!r}")
+    return value
+
+
+def _bool(value: Any, where: str) -> bool:
+    if not isinstance(value, bool):
+        raise ConfigError(f"{where} must be boolean, received {value!r}")
     return value
 
 
@@ -160,6 +231,22 @@ def _apply_overrides(document: dict[str, Any], overrides: Mapping[str, Any] | No
         target[pieces[-1]] = value
 
 
+def _defaults(document: dict[str, Any]) -> None:
+    defaults: dict[str, dict[str, Any]] = {
+        "selection": {"widths": list(WIDTHS), "seeds": list(SEEDS), "representative": "median_int8_macro_f1_then_lowest_seed"},
+        "quality_gates": asdict(QualityGatesConfig()),
+        "quantization": {"calibration_seed": 42, "calibration_examples": 512, "qat": asdict(QATConfig())},
+        "distillation": asdict(DistillationConfig()),
+    }
+    for section, values in defaults.items():
+        current = document.setdefault(section, {})
+        if not isinstance(current, dict):
+            continue
+        for key, value in values.items():
+            current.setdefault(key, value)
+    document["quantization"].setdefault("qat", asdict(QATConfig()))
+
+
 def load_config(path: str | Path, overrides: Mapping[str, Any] | None = None) -> AppConfig:
     """Load and validate one YAML document, resolving paths from its directory."""
     source_path = Path(path).expanduser().resolve()
@@ -170,11 +257,27 @@ def load_config(path: str | Path, overrides: Mapping[str, Any] | None = None) ->
     except yaml.YAMLError as exc:
         raise ConfigError(f"invalid YAML in {source_path}: {exc}") from exc
     document = _mapping(loaded, "root")
+    _defaults(document)
     _apply_overrides(document, overrides)
     _strict_keys(document, "root")
+    required = {
+        "data": {"csv_path", "classes"},
+        "model": {"num_classes"},
+        "training": {"batch_size", "epochs", "device", "num_workers", "scheduler"},
+        "optimizer": {"name", "lr", "weight_decay"},
+        "early_stopping": {"patience", "min_delta"},
+        "augmentation": {"horizontal_flip_probability", "rotation_degrees", "translate_fraction", "scale_min", "scale_max", "brightness", "contrast"},
+        "run": {"directory"},
+        "selection": {"widths", "seeds", "representative"},
+        "quality_gates": set(_SCHEMA["quality_gates"]),
+        "quantization": {"calibration_seed", "calibration_examples", "qat"},
+        "distillation": set(_SCHEMA["distillation"]),
+    }
     for section in _SCHEMA["root"]:
         document[section] = _mapping(document[section], section)
-        _strict_keys(document[section], section)
+        _strict_keys(document[section], section, required=required.get(section))
+    document["quantization"]["qat"] = _mapping(document["quantization"]["qat"], "qat")
+    _strict_keys(document["quantization"]["qat"], "qat", required=set(_SCHEMA["qat"]))
 
     data = document["data"]
     classes = data["classes"]
@@ -185,12 +288,9 @@ def load_config(path: str | Path, overrides: Mapping[str, Any] | None = None) ->
         csv_path = source_path.parent / csv_path
 
     model = document["model"]
-    name = _str(model["name"], "model.name")
-    supported_models = {"ds_cnn_w025", "ds_cnn_w035", "ds_cnn_w050"}
-    if name not in supported_models:
-        raise ConfigError(
-            f"model.name must be one of {sorted(supported_models)!r}, received {name!r}"
-        )
+    legacy_name = model.get("name")
+    if legacy_name is not None and legacy_name not in {"ds_cnn_w025", "ds_cnn_w035", "ds_cnn_w050"}:
+        raise ConfigError(f"model.name must be one of ['ds_cnn_w025', 'ds_cnn_w035', 'ds_cnn_w050'], received {legacy_name!r}")
     num_classes = _int(model["num_classes"], "model.num_classes", 1)
     if num_classes != len(LABELS):
         raise ConfigError(f"model.num_classes must be {len(LABELS)}, received {num_classes}")
@@ -201,38 +301,48 @@ def load_config(path: str | Path, overrides: Mapping[str, Any] | None = None) ->
         raise ConfigError(f"training.device must be auto, cpu, or cuda, received {device!r}")
     scheduler = _str(training["scheduler"], "training.scheduler")
     if scheduler != "cosine":
-        raise ConfigError(f"training.scheduler must be 'cosine', received {scheduler!r}")
+        raise ConfigError("training.scheduler must be 'cosine'")
+    legacy_seed = training.get("seed")
+    if legacy_seed is not None:
+        legacy_seed = _int(legacy_seed, "training.seed", 0)
+    _validate_selection(document["selection"])
+    gates = _parse_gates(document["quality_gates"])
+    quantization = _parse_quantization(document["quantization"])
+    distillation = _parse_distillation(document["distillation"])
 
     optimizer = document["optimizer"]
     optimizer_name = _str(optimizer["name"], "optimizer.name")
     if optimizer_name != "adamw":
-        raise ConfigError(f"optimizer.name must be 'adamw', received {optimizer_name!r}")
-
+        raise ConfigError("optimizer.name must be 'adamw'")
     early = document["early_stopping"]
     aug = document["augmentation"]
     scale_min = _float(aug["scale_min"], "augmentation.scale_min", 0.01)
     scale_max = _float(aug["scale_max"], "augmentation.scale_max", scale_min)
-
-    run = document["run"]
-    run_dir = Path(_str(run["directory"], "run.directory"))
+    if scale_max < scale_min:
+        raise ConfigError("augmentation.scale_max must be >= augmentation.scale_min")
+    run_dir = Path(_str(document["run"]["directory"], "run.directory"))
     if not run_dir.is_absolute():
         run_dir = source_path.parent / run_dir
 
     return AppConfig(
         data=DataConfig(csv_path=csv_path.resolve(), classes=tuple(classes)),
-        model=ModelConfig(name=name, num_classes=num_classes),
+        model=ModelConfig(num_classes=num_classes, name=legacy_name),
         training=TrainingConfig(
             batch_size=_int(training["batch_size"], "training.batch_size", 1),
-            epochs=_int(training["epochs"], "training.epochs", 1),
-            seed=_int(training["seed"], "training.seed", 0),
+            epochs=_int(training["epochs"], "training.epochs", 1, 100),
             device=device,
             num_workers=_int(training["num_workers"], "training.num_workers", 0),
             scheduler=scheduler,
+            seed=legacy_seed,
         ),
+        selection=SelectionConfig(**_selection_values(document["selection"])),
+        quality_gates=gates,
+        quantization=quantization,
+        distillation=distillation,
         optimizer=OptimizerConfig(
             name=optimizer_name,
-            lr=_float(optimizer["lr"], "optimizer.lr", minimum=0.0),
-            weight_decay=_float(optimizer["weight_decay"], "optimizer.weight_decay", minimum=0.0),
+            lr=_float(optimizer["lr"], "optimizer.lr", 0.0),
+            weight_decay=_float(optimizer["weight_decay"], "optimizer.weight_decay", 0.0),
         ),
         early_stopping=EarlyStoppingConfig(
             patience=_int(early["patience"], "early_stopping.patience", 1),
@@ -249,4 +359,65 @@ def load_config(path: str | Path, overrides: Mapping[str, Any] | None = None) ->
         ),
         run=RunConfig(directory=run_dir.resolve()),
         source_path=source_path,
+        legacy_mode=legacy_name is not None or legacy_seed is not None,
+    )
+
+
+def _validate_selection(value: Mapping[str, Any]) -> None:
+    widths = value["widths"]
+    seeds = value["seeds"]
+    if not isinstance(widths, list) or tuple(float(item) for item in widths) != WIDTHS:
+        raise ConfigError(f"selection.widths must be exactly {list(WIDTHS)!r}")
+    if not isinstance(seeds, list) or tuple(seeds) != SEEDS:
+        raise ConfigError(f"selection.seeds must be exactly {list(SEEDS)!r}")
+    if value["representative"] != "median_int8_macro_f1_then_lowest_seed":
+        raise ConfigError("selection.representative is fixed to median_int8_macro_f1_then_lowest_seed")
+
+
+def _selection_values(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {"widths": tuple(float(item) for item in value["widths"]), "seeds": tuple(int(item) for item in value["seeds"]), "representative": value["representative"]}
+
+
+def _parse_gates(value: Mapping[str, Any]) -> QualityGatesConfig:
+    gates = QualityGatesConfig(
+        accuracy=_float(value["accuracy"], "quality_gates.accuracy", 0.0, 1.0),
+        macro_f1=_float(value["macro_f1"], "quality_gates.macro_f1", 0.0, 1.0),
+        recall=_float(value["recall"], "quality_gates.recall", 0.0, 1.0),
+        max_accuracy_delta=_float(value["max_accuracy_delta"], "quality_gates.max_accuracy_delta", 0.0),
+        tflite_bytes=_int(value["tflite_bytes"], "quality_gates.tflite_bytes", 1),
+        arena_with_margin_bytes=_int(value["arena_with_margin_bytes"], "quality_gates.arena_with_margin_bytes", 1),
+        macs=_int(value["macs"], "quality_gates.macs", 1),
+    )
+    return gates
+
+
+def _parse_quantization(value: Mapping[str, Any]) -> QuantizationConfig:
+    if _int(value["calibration_seed"], "quantization.calibration_seed", 0) != 42:
+        raise ConfigError("quantization.calibration_seed is fixed to 42")
+    if _int(value["calibration_examples"], "quantization.calibration_examples", 1) != 512:
+        raise ConfigError("quantization.calibration_examples is fixed to 512")
+    qat = value["qat"]
+    return QuantizationConfig(
+        calibration_seed=42,
+        calibration_examples=512,
+        qat=QATConfig(
+            enabled=_bool(qat["enabled"], "quantization.qat.enabled"),
+            epochs=_int(qat["epochs"], "quantization.qat.epochs", 1, 20),
+            lr=_float(qat["lr"], "quantization.qat.lr", 0.0),
+        ),
+    )
+
+
+def _parse_distillation(value: Mapping[str, Any]) -> DistillationConfig:
+    temperature = _float(value["temperature"], "distillation.temperature", 0.0)
+    ce_weight = _float(value["ce_weight"], "distillation.ce_weight", 0.0)
+    kl_weight = _float(value["kl_weight"], "distillation.kl_weight", 0.0)
+    if abs((ce_weight + kl_weight) - 1.0) > 1e-9:
+        raise ConfigError("distillation.ce_weight + distillation.kl_weight must equal 1")
+    return DistillationConfig(
+        enabled=_bool(value["enabled"], "distillation.enabled"),
+        teacher_seed=_int(value["teacher_seed"], "distillation.teacher_seed", 0),
+        temperature=temperature,
+        ce_weight=ce_weight,
+        kl_weight=kl_weight,
     )

@@ -9,16 +9,22 @@ from .config import (
     AugmentationConfig,
     ConfigError,
     DataConfig,
+    DistillationConfig,
     EarlyStoppingConfig,
     ModelConfig,
     OptimizerConfig,
+    QATConfig,
+    QualityGatesConfig,
+    QuantizationConfig,
     RunConfig,
+    SelectionConfig,
     TrainingConfig,
     load_config,
 )
 
 __all__ = [
     "AppConfig", "AugmentationConfig", "ConfigError", "DataConfig",
-    "EarlyStoppingConfig", "ModelConfig", "OptimizerConfig", "RunConfig",
-    "TrainingConfig", "load_config",
+    "DistillationConfig", "EarlyStoppingConfig", "ModelConfig", "OptimizerConfig",
+    "QATConfig", "QualityGatesConfig", "QuantizationConfig", "RunConfig",
+    "SelectionConfig", "TrainingConfig", "load_config",
 ]
