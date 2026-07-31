@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Add immutable development ONNX and TFLite bundles for frozen runs, with
+  PublicTest-only parity validation, atomic publication, and hash-checked reuse.
+- Add ONNX and ONNX Runtime to the `export` dependency group.
+
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),

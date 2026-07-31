@@ -95,6 +95,9 @@ class ResourceMetrics:
     arena_with_margin_bytes: int
     macs: int
     arena_total_bytes: int | None = None
+    arena_head_bytes: int | None = None
+    arena_temporary_bytes: int | None = None
+    arena_tail_bytes: int | None = None
     input_contract: Mapping[str, Any] = field(default_factory=dict)
     output_contract: Mapping[str, Any] = field(default_factory=dict)
     operators: tuple[Mapping[str, Any], ...] = ()
@@ -105,6 +108,9 @@ class ResourceMetrics:
             "tflite_bytes": self.tflite_bytes,
             "arena_with_margin_bytes": self.arena_with_margin_bytes,
             "arena_total_bytes": self.arena_total_bytes,
+            "arena_head_bytes": self.arena_head_bytes,
+            "arena_temporary_bytes": self.arena_temporary_bytes,
+            "arena_tail_bytes": self.arena_tail_bytes,
             "macs": self.macs,
             "input_contract": dict(self.input_contract),
             "output_contract": dict(self.output_contract),

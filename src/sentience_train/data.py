@@ -49,6 +49,7 @@ class Record:
     offset: int
     label: int
     line_number: int
+    row_sha256: str = ""
 
 
 class FER2013Dataset(Dataset[tuple[torch.Tensor, int]]):
@@ -179,7 +180,14 @@ def load_training_data(data_config: DataConfig, augmentation: AugmentationConfig
                 label = EMOTION_TO_LABEL[emotion]
                 selected_counts[usage][label] += 1
                 if usage in records:
-                    records[usage].append(Record(offset=offset, label=label, line_number=line_number))
+                    records[usage].append(
+                        Record(
+                            offset=offset,
+                            label=label,
+                            line_number=line_number,
+                            row_sha256=hashlib.sha256(raw).hexdigest(),
+                        )
+                    )
             offset += len(raw)
     for usage in USAGES:
         missing = [LABELS[index] for index in range(len(LABELS)) if selected_counts[usage][index] == 0]

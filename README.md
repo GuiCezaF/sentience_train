@@ -6,8 +6,8 @@ Core Artificial Intelligence and Machine Learning module for the **Sentience** p
 
 - **Classification**: Specialized in 4 key classes for professional environment monitoring: `angry`, `happy`, `neutral`, `sad`.
 - **Isolation and Control**: Automatic management of environments and dependencies via [mise](https://github.com/jdx/mise), locking the language version to Python 3.12.
-- **Pipeline Modules**: End-to-end independent flows (training on bases and baselines, test set evaluation, 5-fold cross-validation, and metric comparisons).
-- **Fast Deployment**: Automated export of `.pth` models to `.onnx` ready for production applications.
+- **Pipeline Modules**: Deterministic training and explicit development exports from frozen runs.
+- **Fast Deployment**: Hash-checked ONNX and byte-for-byte TFLite bundles for development consumers.
 
 ## Technologies and Dependencies
 
@@ -23,43 +23,23 @@ Core Artificial Intelligence and Machine Learning module for the **Sentience** p
 2. In the root of this project (`ml/`), `mise` will automatically detect the required version and provision the virtual environment `.venv`.
 3. With the environment activated, install the dependencies:
    ```bash
-   pip install -r requirements.txt
+   uv sync --locked --group dev --group export
    ```
 
 ## Usage
 
-The modular entry point for the application and pipelines is the script `src/index.py`. Below are the available commands via CLI:
+The public workflow is explicit and run-based:
 
-- **Train the MiniVGGNet model**: (Default: 80 epochs, with early stop of 12 patience epochs)
-  ```bash
-  python src/index.py train
-  ```
-  *(Optional parameter: `--epochs N` to override the amount).*
+```bash
+sentience-train train --config configs/default.yaml
+sentience-train export --run-id <run-id> --format onnx
+sentience-train export --run-id <run-id> --format tflite --runs-dir ./runs
+```
 
-- **Test on the Evaluation set**: Run basic result validation metrics.
-  ```bash
-  python src/index.py evaluate
-  ```
-
-- **Map reliability via Cross-Validation (5-Fold)**:
-  ```bash
-  python src/index.py crossval
-  ```
-
-- **Determine Baseline**: Train and compare performance with linear base models.
-  ```bash
-  python src/index.py baseline
-  ```
-
-- **Graphical Comparisons**: View statistical curves.
-  ```bash
-  python src/index.py compare
-  ```
-
-- **Export Artifacts**: Consolidate the best global model into an optimized ONNX inference-ready structure.
-  ```bash
-  python src/index.py export
-  ```
+`--format` is required and issue #5 accepts only `onnx` or `tflite`. `all` and
+any access to `PrivateTest` are reserved for issue #6. Bundles are published
+under `exports/<run-id>/<format>/`, atomically, and reused only when their
+identity and every payload hash match.
 
 ## Project Structure
 
@@ -67,7 +47,8 @@ The modular entry point for the application and pipelines is the script `src/ind
 - `src/data/`: Structural abstractions of the original dataset and basic transformations (numeric data augmentation) into tensors.
 - `src/model/`: Classes containing the semantic structure of Neural Network weights.
 - `src/pipeline/`: Orchestration layer for scripts triggered via CLI.
-- `models/`: Persistence location for trained model checkpoints (`.pth`, `.onnx`).
+- `runs/`: Immutable frozen training runs, including indexed `PublicTest` records.
+- `exports/`: Atomic ONNX or copied INT8 TFLite development bundles.
 - `logs/`: Persistent terminal record of train or evaluation sessions.
 
 ## License

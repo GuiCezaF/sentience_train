@@ -355,7 +355,7 @@ def _validate_inspection(inspection: Inspection) -> None:
             raise PreflightError("contract", f"{name} quantization scale must be finite and positive", observed=actual.scale)
     if any(dtype in {"float", "float32", "fp32"} for dtype in inspection.activation_dtypes):
         raise PreflightError("contract", "FP32 activation found in computational path", observed=list(inspection.activation_dtypes))
-    unsupported = [asdict(operator) for operator in inspection.operators if operator.custom_code is not None or operator.builtin not in ALLOWED_BUILTINS or operator.version > MAX_OPERATOR_VERSIONS.get(operator.builtin, 0)]
+    unsupported = [asdict(operator) for operator in inspection.operators if operator.custom_code is not None or operator.builtin not in ALLOWED_BUILTINS or operator.version < 1 or operator.version > MAX_OPERATOR_VERSIONS.get(operator.builtin, 0)]
     if unsupported:
         raise PreflightError("operators", "unsupported, custom, or incompatible operator version", observed=unsupported, limit=sorted(ALLOWED_BUILTINS))
 

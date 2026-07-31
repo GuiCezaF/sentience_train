@@ -21,10 +21,13 @@ from .config import (
     TrainingConfig,
     load_config,
 )
+from .export import ExportCollisionError, ExportInputError, ExportResult, ExportValidationError, export_development, resolve_frozen_run
 
 __all__ = [
     "AppConfig", "AugmentationConfig", "ConfigError", "DataConfig",
     "DistillationConfig", "EarlyStoppingConfig", "ModelConfig", "OptimizerConfig",
     "QATConfig", "QualityGatesConfig", "QuantizationConfig", "RunConfig",
     "SelectionConfig", "TrainingConfig", "load_config",
+    "ExportCollisionError", "ExportInputError", "ExportResult", "ExportValidationError",
+    "export_development", "resolve_frozen_run",
 ]

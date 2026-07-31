@@ -23,7 +23,7 @@ from torch import nn
 from torch.nn import functional as F
 from torch.utils.data import DataLoader
 
-from .artifacts import RunStaging, append_jsonl, git_state, sha256_file, utc_now
+from .artifacts import RunStaging, append_jsonl, git_state, sha256_file, utc_now, write_public_test_index
 from .config import AppConfig, LABELS, ModelConfig, QATConfig, SEEDS, WIDTHS
 from .data import FER2013Dataset, TrainingData, load_training_data
 from .models import NHWCModel, build_candidate, build_teacher
@@ -373,6 +373,9 @@ def _resource_from_mapping(value: Mapping[str, Any]) -> ResourceMetrics:
         tflite_bytes=int(value["tflite_bytes"]),
         arena_with_margin_bytes=int(value["arena_with_margin_bytes"]),
         arena_total_bytes=None if value.get("arena_total_bytes") is None else int(value["arena_total_bytes"]),
+        arena_head_bytes=None if value.get("arena_head_bytes") is None else int(value["arena_head_bytes"]),
+        arena_temporary_bytes=None if value.get("arena_temporary_bytes") is None else int(value["arena_temporary_bytes"]),
+        arena_tail_bytes=None if value.get("arena_tail_bytes") is None else int(value["arena_tail_bytes"]),
         macs=int(value["macs"]),
         input_contract=value.get("input_contract", {}),
         output_contract=value.get("output_contract", {}),
@@ -449,6 +452,9 @@ def _quantize(
             tflite_bytes=destination.stat().st_size,
             arena_with_margin_bytes=math.ceil(arena_total * 1.20),
             arena_total_bytes=arena_total,
+            arena_head_bytes=arena.head_bytes,
+            arena_temporary_bytes=arena.temporary_bytes,
+            arena_tail_bytes=arena.tail_bytes,
             macs=_macs(model),
             input_contract=_as_contract(inspection.input),
             output_contract=_as_contract(inspection.output),
@@ -689,21 +695,42 @@ def _artifact_hashes(directory: Path) -> dict[str, str]:
     return {str(path.relative_to(directory)): sha256_file(path) for path in sorted(directory.rglob("*")) if path.is_file() and path.name != "manifest.json"}
 
 
-def _selection_manifest(config: AppConfig, data: TrainingData, staging: RunStaging, status: str, device: torch.device, widths: Sequence[WidthAggregate], selected: WidthAggregate | None, teacher: Mapping[str, Any] | None) -> dict[str, Any]:
+def _selection_manifest(
+    config: AppConfig,
+    data: TrainingData,
+    staging: RunStaging,
+    status: str,
+    device: torch.device,
+    widths: Sequence[WidthAggregate],
+    selected: WidthAggregate | None,
+    teacher: Mapping[str, Any] | None,
+    toolchain: Any | None = None,
+) -> dict[str, Any]:
     lock = config.source_path.parent.parent / "uv.lock"
     selected_rep = selected.representative if selected else None
+    toolchain_versions: dict[str, Any] = {}
+    if toolchain is not None and callable(getattr(toolchain, "versions", None)):
+        try:
+            toolchain_versions = dict(toolchain.versions())
+        except Exception:
+            toolchain_versions = {"status": "unavailable"}
     document: dict[str, Any] = {
+        "schema": "frozen-run/v1",
+        "schema_version": "frozen-run/v1",
         "status": status,
+        "private_test_access": False,
         "run_id": staging.run_id,
         "created_at": utc_now(),
         "configuration": config.resolved_dict(),
         "selection": {"width_order": list(WIDTHS), "seed_order": list(SEEDS), "stop_at_first_pass": True, "representative_policy": config.selection.representative},
         "labels": list(LABELS),
         "label_mapping": {"0": "angry", "3": "happy", "6": "neutral", "4": "sad"},
-        "csv": {"path": str(data.provenance.path), "sha256": data.provenance.sha256, "schema": list(data.provenance.header), "release_evidence": data.provenance.release_evidence, "total_rows": data.provenance.total_rows, "partition_counts": data.provenance.partition_counts, "raw_class_counts": data.provenance.raw_class_counts, "selected_class_counts": data.provenance.selected_class_counts, "records_used": ["Training", "PublicTest"], "private_test_access": False},
+        "csv": {"path": str(data.provenance.path), "sha256": data.provenance.sha256, "dataset_sha256": data.provenance.sha256, "schema": list(data.provenance.header), "release_evidence": data.provenance.release_evidence, "total_rows": data.provenance.total_rows, "partition_counts": data.provenance.partition_counts, "raw_class_counts": data.provenance.raw_class_counts, "selected_class_counts": data.provenance.selected_class_counts, "records_used": ["Training", "PublicTest"], "private_test_access": False},
+        "public_test_index": "data/public_test.index.json",
         "git": git_state(config.source_path.parent.parent),
         "uv_lock_sha256": sha256_file(lock) if lock.is_file() else None,
-        "versions": {"python": sys.version, "torch": torch.__version__, "numpy": np.__version__, "platform": platform.platform()},
+        "versions": {"python": sys.version, "torch": torch.__version__, "numpy": np.__version__, "platform": platform.platform(), "training_toolchain": toolchain_versions},
+        "toolchain": toolchain_versions,
         "device": str(device),
         "candidate_comparison": "candidate-comparison.json",
         "candidates": [width.to_dict() for width in widths],
@@ -711,17 +738,32 @@ def _selection_manifest(config: AppConfig, data: TrainingData, staging: RunStagi
         "artifacts": _artifact_hashes(staging.staging),
     }
     if selected_rep is not None:
+        checkpoint = selected_rep.checkpoint_qat or selected_rep.checkpoint_fp32
+        calibration: dict[str, Any] | None = None
+        if selected_rep.tflite is not None:
+            calibration_path = staging.staging / Path(selected_rep.tflite).parent / "metrics" / "calibration.json"
+            if calibration_path.is_file():
+                calibration = json.loads(calibration_path.read_text(encoding="utf-8"))
         document["selected"] = {
+            "architecture": "DS-CNN",
+            "model_name": f"ds_cnn_w{int(round(selected.width * 100)):03d}",
             "width": selected.width,
             "seed": selected_rep.seed,
+            "checkpoint": checkpoint,
             "checkpoint_fp32": selected_rep.checkpoint_fp32,
             "checkpoint_qat": selected_rep.checkpoint_qat,
+            "tflite": selected_rep.tflite,
             "int8_artifact": selected_rep.tflite,
             "labels": list(LABELS),
             "route": selected_rep.route,
             "best_epoch": selected_rep.best_epoch,
             "configuration": config.resolved_dict(),
-            "metrics": selected_rep.int8_metrics.to_dict() if selected_rep.int8_metrics else None,
+            "metrics": {"fp32": selected_rep.fp32_metrics.to_dict(), "int8": selected_rep.int8_metrics.to_dict() if selected_rep.int8_metrics else None},
+            "metrics_fp32": selected_rep.fp32_metrics.to_dict(),
+            "metrics_int8": selected_rep.int8_metrics.to_dict() if selected_rep.int8_metrics else None,
+            "resources": selected_rep.resources.to_dict() if selected_rep.resources else None,
+            "calibration": calibration,
+            "versions": {"training": document["versions"], "export": {"uv_lock_sha256": document["uv_lock_sha256"]}},
         }
     return document
 
@@ -749,6 +791,12 @@ def _run_selection(
     data = load_training_data(config.data, config.augmentation)
     staging = RunStaging.create(config.run.directory)
     staging.write_resolved_config(config.resolved_dict())
+    write_public_test_index(
+        staging.staging,
+        dataset_path=data.provenance.path,
+        dataset_sha256=data.provenance.sha256,
+        records=data.validation.records,
+    )
     log_path = staging.staging / "logs" / "selection.jsonl"
     append_jsonl(log_path, {"event": "selection_started", "run_id": staging.run_id, "private_test_access": False})
     quantizer = toolchain or _DefaultToolchain()
@@ -791,7 +839,7 @@ def _run_selection(
             widths.extend(WidthAggregate(width, (), {}, None, None, GateResult(False, {}, {}, ("not_attempted_after_first_pass",)), "not_attempted", "not_attempted_after_first_pass") for width in WIDTHS if width not in attempted)
             payload = _comparison_payload(widths, status="frozen", selected=selected, teacher=teacher_provenance, config=config)
             _write_comparison(staging.staging, payload)
-            staging.write_manifest(_selection_manifest(config, data, staging, "frozen", device, widths, selected, teacher_provenance))
+            staging.write_manifest(_selection_manifest(config, data, staging, "frozen", device, widths, selected, teacher_provenance, quantizer))
             final = staging.finalize()
             representative = selected.representative
             assert representative is not None and representative.tflite is not None and representative.checkpoint_fp32 is not None
@@ -807,7 +855,7 @@ def _run_selection(
         widths.extend(WidthAggregate(width, (), {}, None, None, GateResult(False, {}, {}, ("not_attempted",)), "not_attempted", "not_attempted") for width in WIDTHS if width not in attempted)
         payload = _comparison_payload(widths, status="selection_failed", selected=None, teacher=teacher_provenance, config=config)
         _write_comparison(staging.staging, payload)
-        staging.write_manifest(_selection_manifest(config, data, staging, "selection_failed", device, widths, None, teacher_provenance))
+        staging.write_manifest(_selection_manifest(config, data, staging, "selection_failed", device, widths, None, teacher_provenance, quantizer))
         final = staging.finalize()
         raise SelectionFailed(final)
     except SelectionFailed:
@@ -817,7 +865,7 @@ def _run_selection(
         if staging.staging.exists():
             payload = _comparison_payload(widths, status="selection_failed", selected=None, teacher=teacher_provenance, config=config)
             _write_comparison(staging.staging, payload)
-            staging.write_manifest(_selection_manifest(config, data, staging, "selection_failed", device, widths, None, teacher_provenance))
+            staging.write_manifest(_selection_manifest(config, data, staging, "selection_failed", device, widths, None, teacher_provenance, quantizer))
             final = staging.finalize()
             raise SelectionFailed(final, f"unexpected selection error: {exc}") from exc
         raise

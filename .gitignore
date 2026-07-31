@@ -226,3 +226,7 @@ dataset/
 
 # models
 models/
+
+# immutable training/export transactions
+runs/
+exports/

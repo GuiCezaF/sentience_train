@@ -10,7 +10,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 import yaml
 
@@ -35,6 +35,37 @@ def append_jsonl(path: Path, event: dict[str, Any]) -> None:
     event = {"timestamp": utc_now(), **event}
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n")
+
+
+def write_public_test_index(
+    run_directory: Path,
+    *,
+    dataset_path: Path,
+    dataset_sha256: str,
+    records: Iterable[Any],
+) -> Path:
+    """Persist the only dataset records an export is allowed to evaluate."""
+    destination = run_directory / "data" / "public_test.index.json"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    entries = [
+        {
+            "offset": int(record.offset),
+            "label": int(record.label),
+            "line_number": int(record.line_number),
+            "row_sha256": str(record.row_sha256),
+        }
+        for record in records
+    ]
+    payload = {
+        "schema": "public-test-index/v1",
+        "partition": "PublicTest",
+        "labels": ["angry", "happy", "neutral", "sad"],
+        "dataset": {"path": str(dataset_path), "sha256": dataset_sha256},
+        "count": len(entries),
+        "records": entries,
+    }
+    destination.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return destination
 
 
 def git_state(root: Path) -> dict[str, Any]:
