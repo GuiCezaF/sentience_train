@@ -1,0 +1,30 @@
+data:
+  csv_path: ../dataset/fer2013.csv
+  classes: [angry, happy, neutral, sad]
+model:
+  name: minivgg
+  num_classes: 4
+training:
+  batch_size: 128
+  epochs: 100
+  seed: 42
+  device: auto
+  num_workers: 0
+  scheduler: cosine
+optimizer:
+  name: adamw
+  lr: 0.001
+  weight_decay: 0.0001
+early_stopping:
+  patience: 12
+  min_delta: 0.002
+augmentation:
+  horizontal_flip_probability: 0.5
+  rotation_degrees: 10.0
+  translate_fraction: 0.08
+  scale_min: 0.95
+  scale_max: 1.05
+  brightness: 0.15
+  contrast: 0.15
+run:
+  directory: ../runs
