@@ -9,7 +9,7 @@ import yaml
 
 from sentience_train.config import load_config
 from sentience_train.engine import run_training
-from sentience_train.selection import Metrics, ResourceMetrics
+from sentience_train.metrics import Metrics, ResourceMetrics
 
 
 def _write_csv(path: Path) -> None:
@@ -24,32 +24,81 @@ def _write_csv(path: Path) -> None:
 
 
 def _config(path: Path) -> None:
-    path.write_text(yaml.safe_dump({
-        "data": {"csv_path": "fer.csv", "classes": ["angry", "happy", "neutral", "sad"]},
-        "model": {"num_classes": 4},
-        "training": {"batch_size": 512, "epochs": 1, "device": "cpu", "num_workers": 0, "scheduler": "cosine"},
-        "selection": {"widths": [0.25, 0.35, 0.50], "seeds": [42, 43, 44], "representative": "median_int8_macro_f1_then_lowest_seed"},
-        "quality_gates": {"accuracy": 0.0, "macro_f1": 0.0, "recall": 0.0, "max_accuracy_delta": 0.02, "tflite_bytes": 100, "arena_with_margin_bytes": 10, "macs": 10},
-        "quantization": {"calibration_seed": 42, "calibration_examples": 512, "qat": {"enabled": True, "epochs": 1, "lr": 0.00001}},
-        "distillation": {"enabled": False, "teacher_seed": 42, "temperature": 4.0, "ce_weight": 0.5, "kl_weight": 0.5},
-        "optimizer": {"name": "adamw", "lr": 0.001, "weight_decay": 0.0001},
-        "early_stopping": {"patience": 12, "min_delta": 0.002},
-        "augmentation": {"horizontal_flip_probability": 0.0, "rotation_degrees": 0, "translate_fraction": 0, "scale_min": 1, "scale_max": 1, "brightness": 0, "contrast": 0},
-        "run": {"directory": "runs"},
-    }), encoding="utf-8")
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "data": {
+                    "csv_path": "fer.csv",
+                    "classes": ["angry", "happy", "neutral", "sad"],
+                },
+                "model": {"num_classes": 4},
+                "training": {
+                    "batch_size": 512,
+                    "epochs": 1,
+                    "device": "cpu",
+                    "num_workers": 0,
+                    "scheduler": "cosine",
+                },
+                "selection": {
+                    "widths": [0.25, 0.35, 0.50],
+                    "seeds": [42, 43, 44],
+                    "representative": "median_int8_macro_f1_then_lowest_seed",
+                },
+                "quality_gates": {
+                    "accuracy": 0.0,
+                    "macro_f1": 0.0,
+                    "recall": 0.0,
+                    "max_accuracy_delta": 0.02,
+                    "tflite_bytes": 100,
+                    "arena_with_margin_bytes": 10,
+                    "macs": 10,
+                },
+                "quantization": {
+                    "calibration_seed": 42,
+                    "calibration_examples": 512,
+                    "qat": {"enabled": True, "epochs": 1, "lr": 0.00001},
+                },
+                "optimizer": {"name": "adamw", "lr": 0.001, "weight_decay": 0.0001},
+                "early_stopping": {"patience": 12, "min_delta": 0.002},
+                "augmentation": {
+                    "horizontal_flip_probability": 0.0,
+                    "rotation_degrees": 0,
+                    "translate_fraction": 0,
+                    "scale_min": 1,
+                    "scale_max": 1,
+                    "brightness": 0,
+                    "contrast": 0,
+                },
+                "run": {"directory": "runs"},
+            }
+        ),
+        encoding="utf-8",
+    )
 
 
 def _fake_metrics() -> Metrics:
-    return Metrics(0.8, 0.7, 0.2, (0.6,) * 4, (0.7,) * 4, (0.7,) * 4, (1,) * 4, ((1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1)), dtype="int8")
+    return Metrics(
+        0.8,
+        0.7,
+        0.2,
+        (0.6,) * 4,
+        (0.7,) * 4,
+        (0.7,) * 4,
+        (1,) * 4,
+        ((1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1)),
+        dtype="int8",
+    )
 
 
-def test_selection_freezes_first_width_and_never_reads_private_test(tmp_path: Path) -> None:
+def test_selection_freezes_first_width_and_never_reads_private_test(
+    tmp_path: Path,
+) -> None:
     _write_csv(tmp_path / "fer.csv")
     _config(tmp_path / "config.yaml")
     config = load_config(tmp_path / "config.yaml")
     calls: list[tuple[float, int]] = []
 
-    def model_factory(_candidate):  # type: ignore[no-untyped-def]
+    def model_factory(_model_name, _num_classes):  # type: ignore[no-untyped-def]
         return torch.nn.Sequential(torch.nn.Flatten(), torch.nn.Linear(48 * 48, 4))
 
     def quantize(model, calibration, destination, route, width, seed):  # type: ignore[no-untyped-def]

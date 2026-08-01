@@ -74,6 +74,7 @@ def git_state(root: Path) -> dict[str, Any]:
             return subprocess.check_output(args, cwd=root, stderr=subprocess.DEVNULL, text=True).strip()
         except (OSError, subprocess.CalledProcessError):
             return None
+
     revision = command("git", "rev-parse", "HEAD")
     dirty = command("git", "status", "--porcelain")
     return {"revision": revision, "dirty": bool(dirty) if dirty is not None else None}
@@ -105,7 +106,9 @@ class RunStaging:
         (self.staging / "config.resolved.yaml").write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
 
     def write_manifest(self, document: dict[str, Any]) -> None:
-        (self.staging / "manifest.json").write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        (self.staging / "manifest.json").write_text(
+            json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
 
     def finalize(self) -> Path:
         if self.final.exists():

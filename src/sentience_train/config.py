@@ -27,9 +27,6 @@ class DataConfig:
 @dataclass(frozen=True)
 class ModelConfig:
     num_classes: int = 4
-    # Kept only to read issue-#3 fixtures.  It is deliberately omitted from
-    # resolved configuration and is never consulted by the new orchestrator.
-    name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -39,8 +36,6 @@ class TrainingConfig:
     device: str = "auto"
     num_workers: int = 0
     scheduler: str = "cosine"
-    # Deprecated compatibility input; public selection always uses SEEDS.
-    seed: int | None = None
 
 
 @dataclass(frozen=True)
@@ -73,15 +68,6 @@ class QuantizationConfig:
     calibration_seed: int = 42
     calibration_examples: int = 512
     qat: QATConfig = QATConfig()
-
-
-@dataclass(frozen=True)
-class DistillationConfig:
-    enabled: bool = True
-    teacher_seed: int = 42
-    temperature: float = 4.0
-    ce_weight: float = 0.5
-    kl_weight: float = 0.5
 
 
 @dataclass(frozen=True)
@@ -121,40 +107,58 @@ class AppConfig:
     selection: SelectionConfig
     quality_gates: QualityGatesConfig
     quantization: QuantizationConfig
-    distillation: DistillationConfig
     optimizer: OptimizerConfig
     early_stopping: EarlyStoppingConfig
     augmentation: AugmentationConfig
     run: RunConfig
     source_path: Path
-    legacy_mode: bool = False
 
     def resolved_dict(self) -> dict[str, Any]:
-        """Serialize the effective public policy, excluding legacy aliases."""
+        """Serialize the effective public policy."""
         value = asdict(self)
         value.pop("source_path", None)
-        value.pop("legacy_mode", None)
-        value["model"].pop("name", None)
-        value["training"].pop("seed", None)
         return _paths_to_strings(value)
 
 
 _SCHEMA: dict[str, set[str]] = {
     "root": {
-        "data", "model", "training", "selection", "quality_gates", "quantization",
-        "distillation", "optimizer", "early_stopping", "augmentation", "run",
+        "data",
+        "model",
+        "training",
+        "selection",
+        "quality_gates",
+        "quantization",
+        "optimizer",
+        "early_stopping",
+        "augmentation",
+        "run",
     },
     "data": {"csv_path", "classes"},
-    "model": {"name", "num_classes"},
-    "training": {"batch_size", "epochs", "seed", "device", "num_workers", "scheduler"},
+    "model": {"num_classes"},
+    "training": {"batch_size", "epochs", "device", "num_workers", "scheduler"},
     "selection": {"widths", "seeds", "representative"},
-    "quality_gates": {"accuracy", "macro_f1", "recall", "max_accuracy_delta", "tflite_bytes", "arena_with_margin_bytes", "macs"},
+    "quality_gates": {
+        "accuracy",
+        "macro_f1",
+        "recall",
+        "max_accuracy_delta",
+        "tflite_bytes",
+        "arena_with_margin_bytes",
+        "macs",
+    },
     "quantization": {"calibration_seed", "calibration_examples", "qat"},
     "qat": {"enabled", "epochs", "lr"},
-    "distillation": {"enabled", "teacher_seed", "temperature", "ce_weight", "kl_weight"},
     "optimizer": {"name", "lr", "weight_decay"},
     "early_stopping": {"patience", "min_delta"},
-    "augmentation": {"horizontal_flip_probability", "rotation_degrees", "translate_fraction", "scale_min", "scale_max", "brightness", "contrast"},
+    "augmentation": {
+        "horizontal_flip_probability",
+        "rotation_degrees",
+        "translate_fraction",
+        "scale_min",
+        "scale_max",
+        "brightness",
+        "contrast",
+    },
     "run": {"directory"},
 }
 
@@ -233,10 +237,17 @@ def _apply_overrides(document: dict[str, Any], overrides: Mapping[str, Any] | No
 
 def _defaults(document: dict[str, Any]) -> None:
     defaults: dict[str, dict[str, Any]] = {
-        "selection": {"widths": list(WIDTHS), "seeds": list(SEEDS), "representative": "median_int8_macro_f1_then_lowest_seed"},
+        "selection": {
+            "widths": list(WIDTHS),
+            "seeds": list(SEEDS),
+            "representative": "median_int8_macro_f1_then_lowest_seed",
+        },
         "quality_gates": asdict(QualityGatesConfig()),
-        "quantization": {"calibration_seed": 42, "calibration_examples": 512, "qat": asdict(QATConfig())},
-        "distillation": asdict(DistillationConfig()),
+        "quantization": {
+            "calibration_seed": 42,
+            "calibration_examples": 512,
+            "qat": asdict(QATConfig()),
+        },
     }
     for section, values in defaults.items():
         current = document.setdefault(section, {})
@@ -266,12 +277,19 @@ def load_config(path: str | Path, overrides: Mapping[str, Any] | None = None) ->
         "training": {"batch_size", "epochs", "device", "num_workers", "scheduler"},
         "optimizer": {"name", "lr", "weight_decay"},
         "early_stopping": {"patience", "min_delta"},
-        "augmentation": {"horizontal_flip_probability", "rotation_degrees", "translate_fraction", "scale_min", "scale_max", "brightness", "contrast"},
+        "augmentation": {
+            "horizontal_flip_probability",
+            "rotation_degrees",
+            "translate_fraction",
+            "scale_min",
+            "scale_max",
+            "brightness",
+            "contrast",
+        },
         "run": {"directory"},
         "selection": {"widths", "seeds", "representative"},
         "quality_gates": set(_SCHEMA["quality_gates"]),
         "quantization": {"calibration_seed", "calibration_examples", "qat"},
-        "distillation": set(_SCHEMA["distillation"]),
     }
     for section in _SCHEMA["root"]:
         document[section] = _mapping(document[section], section)
@@ -288,9 +306,6 @@ def load_config(path: str | Path, overrides: Mapping[str, Any] | None = None) ->
         csv_path = source_path.parent / csv_path
 
     model = document["model"]
-    legacy_name = model.get("name")
-    if legacy_name is not None and legacy_name not in {"ds_cnn_w025", "ds_cnn_w035", "ds_cnn_w050"}:
-        raise ConfigError(f"model.name must be one of ['ds_cnn_w025', 'ds_cnn_w035', 'ds_cnn_w050'], received {legacy_name!r}")
     num_classes = _int(model["num_classes"], "model.num_classes", 1)
     if num_classes != len(LABELS):
         raise ConfigError(f"model.num_classes must be {len(LABELS)}, received {num_classes}")
@@ -302,13 +317,9 @@ def load_config(path: str | Path, overrides: Mapping[str, Any] | None = None) ->
     scheduler = _str(training["scheduler"], "training.scheduler")
     if scheduler != "cosine":
         raise ConfigError("training.scheduler must be 'cosine'")
-    legacy_seed = training.get("seed")
-    if legacy_seed is not None:
-        legacy_seed = _int(legacy_seed, "training.seed", 0)
     _validate_selection(document["selection"])
     gates = _parse_gates(document["quality_gates"])
     quantization = _parse_quantization(document["quantization"])
-    distillation = _parse_distillation(document["distillation"])
 
     optimizer = document["optimizer"]
     optimizer_name = _str(optimizer["name"], "optimizer.name")
@@ -326,19 +337,17 @@ def load_config(path: str | Path, overrides: Mapping[str, Any] | None = None) ->
 
     return AppConfig(
         data=DataConfig(csv_path=csv_path.resolve(), classes=tuple(classes)),
-        model=ModelConfig(num_classes=num_classes, name=legacy_name),
+        model=ModelConfig(num_classes=num_classes),
         training=TrainingConfig(
             batch_size=_int(training["batch_size"], "training.batch_size", 1),
             epochs=_int(training["epochs"], "training.epochs", 1, 100),
             device=device,
             num_workers=_int(training["num_workers"], "training.num_workers", 0),
             scheduler=scheduler,
-            seed=legacy_seed,
         ),
         selection=SelectionConfig(**_selection_values(document["selection"])),
         quality_gates=gates,
         quantization=quantization,
-        distillation=distillation,
         optimizer=OptimizerConfig(
             name=optimizer_name,
             lr=_float(optimizer["lr"], "optimizer.lr", 0.0),
@@ -349,7 +358,12 @@ def load_config(path: str | Path, overrides: Mapping[str, Any] | None = None) ->
             min_delta=_float(early["min_delta"], "early_stopping.min_delta", 0.0),
         ),
         augmentation=AugmentationConfig(
-            horizontal_flip_probability=_float(aug["horizontal_flip_probability"], "augmentation.horizontal_flip_probability", 0.0, 1.0),
+            horizontal_flip_probability=_float(
+                aug["horizontal_flip_probability"],
+                "augmentation.horizontal_flip_probability",
+                0.0,
+                1.0,
+            ),
             rotation_degrees=_float(aug["rotation_degrees"], "augmentation.rotation_degrees", 0.0),
             translate_fraction=_float(aug["translate_fraction"], "augmentation.translate_fraction", 0.0, 1.0),
             scale_min=scale_min,
@@ -359,7 +373,6 @@ def load_config(path: str | Path, overrides: Mapping[str, Any] | None = None) ->
         ),
         run=RunConfig(directory=run_dir.resolve()),
         source_path=source_path,
-        legacy_mode=legacy_name is not None or legacy_seed is not None,
     )
 
 
@@ -375,7 +388,11 @@ def _validate_selection(value: Mapping[str, Any]) -> None:
 
 
 def _selection_values(value: Mapping[str, Any]) -> dict[str, Any]:
-    return {"widths": tuple(float(item) for item in value["widths"]), "seeds": tuple(int(item) for item in value["seeds"]), "representative": value["representative"]}
+    return {
+        "widths": tuple(float(item) for item in value["widths"]),
+        "seeds": tuple(int(item) for item in value["seeds"]),
+        "representative": value["representative"],
+    }
 
 
 def _parse_gates(value: Mapping[str, Any]) -> QualityGatesConfig:
@@ -405,19 +422,4 @@ def _parse_quantization(value: Mapping[str, Any]) -> QuantizationConfig:
             epochs=_int(qat["epochs"], "quantization.qat.epochs", 1, 20),
             lr=_float(qat["lr"], "quantization.qat.lr", 0.0),
         ),
-    )
-
-
-def _parse_distillation(value: Mapping[str, Any]) -> DistillationConfig:
-    temperature = _float(value["temperature"], "distillation.temperature", 0.0)
-    ce_weight = _float(value["ce_weight"], "distillation.ce_weight", 0.0)
-    kl_weight = _float(value["kl_weight"], "distillation.kl_weight", 0.0)
-    if abs((ce_weight + kl_weight) - 1.0) > 1e-9:
-        raise ConfigError("distillation.ce_weight + distillation.kl_weight must equal 1")
-    return DistillationConfig(
-        enabled=_bool(value["enabled"], "distillation.enabled"),
-        teacher_seed=_int(value["teacher_seed"], "distillation.teacher_seed", 0),
-        temperature=temperature,
-        ce_weight=ce_weight,
-        kl_weight=kl_weight,
     )

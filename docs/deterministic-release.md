@@ -1,34 +1,27 @@
-# Deterministic release guide
+# Release determinístico
 
-The official release command is:
+O workflow público de release é:
 
 ```text
 sentience-train export --run-id <run-id>
 ```
 
-`all` is the default and publishes `exports/<run-id>/all/`. It validates the
-immutable frozen run, creates the ONNX and copied INT8 TFLite handoffs, and
-records PublicTest evidence before the final release gate.
+`all` é o padrão e publica `exports/<run-id>/all/`, com handoffs ONNX FP32 e
+TFLite INT8, validação de `PublicTest`, gates host e, somente então, a reserva
+atômica de `PrivateTest`. Os formatos `onnx` e `tflite` publicam handoffs
+individuais e nunca criam o ledger reservado.
 
-The `onnx` and `tflite` formats are development exports. They are limited to
-the indexed `PublicTest` partition and never create a PrivateTest ledger.
+ONNX registra NCHW `[N,1,48,48]`, batch dinâmico e normalização
+`pixel / 127.5 - 1`. TFLite registra NHWC `[1,48,48,1]`, batch fixo, escala,
+zero-point, labels, operadores e arquivos C++ derivados dos mesmos bytes.
 
-The complete flow reserves PrivateTest exactly once at:
+A transação completa reserva `PrivateTest` exatamente uma vez em
+`exports/<run-id>/.private-test-access/<candidate-identity>/`. Crash, reserva
+concorrente ou ledger sem bundle final bloqueia nova tentativa. Bundles
+finalizados são imutáveis e só podem ser reutilizados após validação do digest
+do manifesto e de todos os payloads.
 
-```text
-exports/<run-id>/.private-test-access/<candidate-identity>/
-```
-
-The directory is created atomically before any reserved row is read. A crash,
-concurrent reservation, or ledger without a final bundle blocks retry. A
-completed bundle is immutable and may be reused only after its root manifest
-self-digest and all payload hashes validate.
-
-Candidate identity is derived from the frozen manifest, checkpoint, TFLite,
-dataset, and frozen configuration. Exporter source changes and lock changes
-are provenance changes; they cannot authorize a second PrivateTest evaluation.
-
-Every complete bundle ends in `accepted` or `failed`. The final evidence keeps
-PublicTest and PrivateTest separate, stores metrics and raw confusion matrices,
-and marks ESP32-S3 latency p95 and measured arena as `pending_external` until
-target-device evidence is supplied.
+Os gates host verificam 1 MiB de TFLite, 1,5 MiB de arena com margem e 15
+milhões de MACs. Arena medida no ESP32-S3 e p95 de 200 ms permanecem
+`pending_external`. Status final é sempre `accepted` ou `failed`; resultados
+de `PublicTest` e `PrivateTest` permanecem separados.

@@ -4,11 +4,17 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
 from .config import ConfigError, load_config
 from .data import DataValidationError
 from .engine import run_training
-from .export import ExportCollisionError, ExportInputError, ExportValidationError, export_frozen_run
+from .export import (
+    ExportCollisionError,
+    ExportInputError,
+    ExportValidationError,
+    export_frozen_run,
+)
 from .selection import SelectionFailed
 
 
@@ -37,7 +43,12 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if args.command == "export":
         try:
-            result = export_frozen_run(args.run_id, args.format, runs_root=args.runs_dir, exports_root="./exports")
+            result = export_frozen_run(
+                args.run_id,
+                args.format,
+                runs_root=Path(args.runs_dir),
+                exports_root=Path("./exports"),
+            )
         except ExportInputError as exc:
             print(f"input/run error: {exc}", file=sys.stderr)
             return 2
@@ -51,7 +62,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{action} {result.status} {result.format} export for {result.run_id}: {result.directory}")
         return 0 if result.status in {"development", "accepted"} else 1
 
-    overrides = {f"training.{key}": value for key, value in (("epochs", args.epochs), ("device", args.device)) if value is not None}
+    overrides = {
+        f"training.{key}": value
+        for key, value in (("epochs", args.epochs), ("device", args.device))
+        if value is not None
+    }
     try:
         config = load_config(args.config, overrides)
         completed = run_training(config)

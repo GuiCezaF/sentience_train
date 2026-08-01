@@ -1,9 +1,4 @@
-"""Deployable depthwise-separable CNN candidates.
-
-MiniVGG deliberately does not appear at this public seam.  It may return as a
-private teacher implementation, but every model users can select is one of the
-three bounded DS-CNN widths below.
-"""
+"""Deployable depthwise-separable CNN candidates."""
 
 from __future__ import annotations
 
@@ -66,7 +61,15 @@ class _DepthwiseSeparable(nn.Module):
     def __init__(self, in_channels: int, out_channels: int, stride: int) -> None:
         super().__init__()
         self.depthwise = nn.Sequential(
-            nn.Conv2d(in_channels, in_channels, 3, stride=stride, padding=1, groups=in_channels, bias=False),
+            nn.Conv2d(
+                in_channels,
+                in_channels,
+                3,
+                stride=stride,
+                padding=1,
+                groups=in_channels,
+                bias=False,
+            ),
             nn.BatchNorm2d(in_channels),
             nn.ReLU6(inplace=False),
         )
@@ -87,7 +90,7 @@ class DSCNN(nn.Module):
         super().__init__()
         channels = [_channels(value, width) for value in (32, 64, 128, 256, 512, 1024)]
         stem, c64, c128, c256, c512, c1024 = channels
-        blocks = ((c64, 1), (c128, 2), (c128, 1), (c256, 2), (c256, 1), (c512, 2))
+        blocks: tuple[tuple[int, int], ...] = ((c64, 1), (c128, 2), (c128, 1), (c256, 2), (c256, 1), (c512, 2))
         blocks += ((c512, 1),) * 5
         blocks += ((c1024, 2), (c1024, 1))
         layers: list[nn.Module] = [_ConvBNReLU6(1, stem, 2)]
@@ -129,55 +132,4 @@ def build_candidate(name: str, num_classes: int = 4) -> DSCNN:
 
 
 def build_model(config: ModelConfig) -> nn.Module:
-    # This compatibility entry point is used by the issue-#3 fixtures.  The
-    # release-selection engine calls ``build_candidate`` with its fixed width
-    # policy and never reads ModelConfig.name.
-    if config.name is None:
-        return build_candidate("ds_cnn_w025", config.num_classes)
-    return build_candidate(config.name, config.num_classes)
-
-
-class _TeacherConvBlock(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int) -> None:
-        super().__init__()
-        self.block = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, 3, padding=1),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(out_channels, out_channels, 3, padding=1),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2, 2),
-            nn.Dropout2d(0.25),
-        )
-
-    def forward(self, value: torch.Tensor) -> torch.Tensor:
-        return self.block(value)
-
-
-class _MiniVGGTeacher(nn.Module):
-    """Internal, non-deployable contingency teacher."""
-
-    def __init__(self, num_classes: int = 4) -> None:
-        super().__init__()
-        self.features = nn.Sequential(
-            _TeacherConvBlock(1, 32),
-            _TeacherConvBlock(32, 64),
-            _TeacherConvBlock(64, 128),
-        )
-        self.classifier = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(128 * 6 * 6, 512),
-            nn.BatchNorm1d(512),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.5),
-            nn.Linear(512, num_classes),
-        )
-
-    def forward(self, value: torch.Tensor) -> torch.Tensor:
-        return self.classifier(self.features(value))
-
-
-def build_teacher(num_classes: int = 4) -> nn.Module:
-    """Build the private MiniVGG contingency without exposing it as a candidate."""
-    return _MiniVGGTeacher(num_classes)
+    return build_candidate("ds_cnn_w025", config.num_classes)

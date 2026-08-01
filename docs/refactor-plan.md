@@ -1,6 +1,6 @@
 # FER2013 Four-Emotion Edge Model Refactoring Specification
 
-**Status:** Accepted — approved for implementation on 2026-07-31.
+**Status:** Historical — implemented by Issue #7 on 2026-07-31. The README and deterministic guides are normative.
 
 This specification refactors the existing PyTorch project into a reproducible training
 and export pipeline for a four-emotion classifier. It does not include camera
@@ -169,10 +169,9 @@ These are tunable defaults rather than architectural contracts.
 - Reject candidates statically exceeding a deployment constraint before train.
 - Stop at the smallest candidate passing validation; compare passing candidates
   by TFLite size, arena estimate, MACs, then validation macro-F1.
-- If all widths fail, train the legacy MiniVGG as a non-deployed teacher and
-  retry distilled students from smallest to largest.
-- If distillation also fails, report the failed gates and stop without reading
-  `PrivateTest` or weakening acceptance criteria.
+- If all DS-CNN widths fail, write an immutable diagnosis and stop without
+  reading `PrivateTest` or weakening acceptance criteria. The former
+  distillation contingency is superseded by ADR 0021.
 
 ## Quantization and export
 
@@ -250,8 +249,7 @@ test configuration.
 After the new unit and integration suites pass, remove the old global config,
 entrypoint, ImageFolder data path, MiniVGG deployment path, BaselineCNN, legacy
 pipeline commands, old tests with release fallback behavior,
-`requirements.txt`, and the checked-in stale confusion-matrix image. Retain the
-MiniVGG definition only as an internal teacher if the fallback is activated.
+`requirements.txt`, and the checked-in stale confusion-matrix image. Do not retain the removed teacher contingency; valid frozen runs remain readable.
 
 ## Implementation sequence
 
@@ -263,7 +261,7 @@ MiniVGG definition only as an internal teacher if the fallback is activated.
    operator inspection, and host arena probe.
 4. Run conversion preflight for all widths; stop and diagnose any failure.
 5. Implement the training engine, early stopping, three-seed selection, PTQ,
-   conditional QAT, and optional distillation.
+   and conditional QAT; a later decision removed the distillation contingency.
 6. Run integration tests and then remove the superseded pipeline.
 7. Train against real `Training`, select exclusively with `PublicTest`, and
    produce the immutable release candidate.

@@ -13,7 +13,7 @@ from sentience_train.export import export_frozen_run
 def test_real_frozen_run_release_has_honest_final_status() -> None:
     run_id = os.getenv("SENTIENCE_RELEASE_RUN_ID")
     if not run_id:
-        pytest.skip("set SENTIENCE_RELEASE_RUN_ID to run the canonical FER2013 acceptance check")
+        pytest.fail("SENTIENCE_RELEASE_RUN_ID is required for real acceptance")
     runs_root = Path(os.getenv("SENTIENCE_RELEASE_RUNS_ROOT", "runs"))
     exports_root = Path(os.getenv("SENTIENCE_RELEASE_EXPORTS_ROOT", "exports"))
 

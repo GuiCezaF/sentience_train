@@ -27,9 +27,7 @@ class DataValidationError(ValueError):
 
 
 def _error(path: Path, line: int, field: str, received: Any, expected: str) -> DataValidationError:
-    return DataValidationError(
-        f"{path}: line {line}, field {field}: received {received!r}; expected {expected}"
-    )
+    return DataValidationError(f"{path}: line {line}, field {field}: received {received!r}; expected {expected}")
 
 
 @dataclass(frozen=True)
@@ -81,7 +79,11 @@ class FER2013Dataset(Dataset[tuple[torch.Tensor, int]]):
         try:
             row = next(csv.reader([raw.decode("utf-8").rstrip("\r\n")]))
             pixels = [int(value) for value in row[1].split()]
-        except (UnicodeDecodeError, ValueError, csv.Error) as exc:  # protected by validation
+        except (
+            UnicodeDecodeError,
+            ValueError,
+            csv.Error,
+        ) as exc:  # protected by validation
             raise RuntimeError(f"CSV changed after validation at {self._csv_path}:{record.line_number}") from exc
         image = torch.tensor(pixels, dtype=torch.float32).reshape(1, 48, 48) / 255.0
         if self._augmentation is not None:
@@ -99,7 +101,14 @@ def _augment(image: torch.Tensor, config: AugmentationConfig) -> torch.Tensor:
         int(torch.empty(()).uniform_(-config.translate_fraction, config.translate_fraction).item() * 48),
     ]
     scale = float(torch.empty(()).uniform_(config.scale_min, config.scale_max))
-    image = F.affine(image, angle=angle, translate=translation, scale=scale, shear=[0.0, 0.0], interpolation=InterpolationMode.BILINEAR)
+    image = F.affine(
+        image,
+        angle=angle,
+        translate=translation,
+        scale=scale,
+        shear=[0.0, 0.0],
+        interpolation=InterpolationMode.BILINEAR,
+    )
     brightness = 1.0 + float(torch.empty(()).uniform_(-config.brightness, config.brightness))
     contrast = 1.0 + float(torch.empty(()).uniform_(-config.contrast, config.contrast))
     return F.adjust_contrast(F.adjust_brightness(image, brightness), contrast).clamp_(0.0, 1.0)
@@ -133,15 +142,33 @@ def _parse_row(path: Path, line_number: int, raw: bytes) -> tuple[int, list[int]
         raise _error(path, line_number, "Usage", row[2], "Training, PublicTest, or PrivateTest")
     tokens = row[1].split()
     if len(tokens) != 2304:
-        raise _error(path, line_number, "pixels", f"{len(tokens)} values", "exactly 2304 integers from 0 through 255")
+        raise _error(
+            path,
+            line_number,
+            "pixels",
+            f"{len(tokens)} values",
+            "exactly 2304 integers from 0 through 255",
+        )
     pixels: list[int] = []
     for position, value in enumerate(tokens):
         try:
             pixel = int(value)
         except ValueError as exc:
-            raise _error(path, line_number, "pixels", value, f"integer 0..255 at position {position}") from exc
+            raise _error(
+                path,
+                line_number,
+                "pixels",
+                value,
+                f"integer 0..255 at position {position}",
+            ) from exc
         if pixel < 0 or pixel > 255:
-            raise _error(path, line_number, "pixels", pixel, f"integer 0..255 at position {position}")
+            raise _error(
+                path,
+                line_number,
+                "pixels",
+                pixel,
+                f"integer 0..255 at position {position}",
+            )
         pixels.append(pixel)
     return emotion, pixels, row[2]
 
@@ -153,7 +180,10 @@ def load_training_data(data_config: DataConfig, augmentation: AugmentationConfig
     partition_counts: Counter[str] = Counter()
     raw_counts: dict[str, Counter[int]] = {usage: Counter() for usage in USAGES}
     selected_counts: dict[str, Counter[int]] = {usage: Counter() for usage in USAGES}
-    records: dict[Literal["Training", "PublicTest"], list[Record]] = {"Training": [], "PublicTest": []}
+    records: dict[Literal["Training", "PublicTest"], list[Record]] = {
+        "Training": [],
+        "PublicTest": [],
+    }
     try:
         handle = path.open("rb")
     except OSError as exc:
@@ -201,7 +231,9 @@ def load_training_data(data_config: DataConfig, augmentation: AugmentationConfig
         total_rows=sum(partition_counts.values()),
         partition_counts={usage: partition_counts[usage] for usage in USAGES},
         raw_class_counts={usage: {str(label): raw_counts[usage][label] for label in range(7)} for usage in USAGES},
-        selected_class_counts={usage: {LABELS[label]: selected_counts[usage][label] for label in range(4)} for usage in USAGES},
+        selected_class_counts={
+            usage: {LABELS[label]: selected_counts[usage][label] for label in range(4)} for usage in USAGES
+        },
     )
     train_records = tuple(records["Training"])
     validation_records = tuple(records["PublicTest"])

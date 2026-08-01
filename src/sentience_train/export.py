@@ -1,11 +1,4 @@
-"""Immutable development exports for a frozen training run.
-
-The public seam is deliberately small: `export_development` resolves a
-run, restores its selected checkpoint, validates one requested artifact, and
-publishes a self-contained bundle.  Dataset discovery, model selection,
-conversion, quantization, and reserved-partition access are not part of this
-module's interface.
-"""
+"""Immutable exports for a validated frozen training run."""
 
 from __future__ import annotations
 
@@ -32,7 +25,7 @@ from .artifacts import sha256_file
 from .config import LABELS
 from .models import build_candidate
 from .preflight import ALLOWED_BUILTINS, MAX_OPERATOR_VERSIONS, _macs
-from .selection import Metrics, metrics_from_predictions
+from .metrics import Metrics, metrics_from_predictions
 
 
 EXPORT_SCHEMA = "development-export-bundle/v1"
@@ -158,8 +151,14 @@ def _verify_run_artifacts(run: Path, manifest: Mapping[str, Any]) -> None:
             raise ExportInputError(f"hash mismatch for run artifact {relative}")
 
 
-def _load_public_index(run: Path, manifest: Mapping[str, Any], dataset: Path) -> tuple[Path, tuple[Mapping[str, Any], ...]]:
-    index_path = _inside(run, _required(manifest, "public_test_index", "manifest"), "manifest.public_test_index")
+def _load_public_index(
+    run: Path, manifest: Mapping[str, Any], dataset: Path
+) -> tuple[Path, tuple[Mapping[str, Any], ...]]:
+    index_path = _inside(
+        run,
+        _required(manifest, "public_test_index", "manifest"),
+        "manifest.public_test_index",
+    )
     index = _json(index_path)
     _schema(index, INDEX_SCHEMA, "public_test_index")
     if index.get("partition") != "PublicTest" or index.get("labels") != list(LABELS):
@@ -190,7 +189,14 @@ def _load_public_index(run: Path, manifest: Mapping[str, Any], dataset: Path) ->
         if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
             raise ExportInputError("PublicTest index contains an invalid row hash")
         previous_offset = offset
-        normalized.append({"offset": offset, "label": label, "line_number": line_number, "row_sha256": digest})
+        normalized.append(
+            {
+                "offset": offset,
+                "label": label,
+                "line_number": line_number,
+                "row_sha256": digest,
+            }
+        )
     return index_path, tuple(normalized)
 
 
@@ -205,7 +211,13 @@ def _verify_index_rows(dataset: Path, records: Sequence[Mapping[str, Any]]) -> N
                 try:
                     row = next(csv.reader([raw.decode("utf-8").rstrip("\r\n")]))
                     raw_emotion = int(row[0])
-                except (UnicodeDecodeError, csv.Error, StopIteration, ValueError, IndexError) as exc:
+                except (
+                    UnicodeDecodeError,
+                    csv.Error,
+                    StopIteration,
+                    ValueError,
+                    IndexError,
+                ) as exc:
                     raise ExportInputError(f"PublicTest row {position} is not a valid FER2013 row") from exc
                 mapping = {0: 0, 3: 1, 6: 2, 4: 3}
                 if mapping.get(raw_emotion) != record["label"]:
@@ -223,7 +235,7 @@ def _validate_frozen_metrics(value: Mapping[str, Any], where: str, dtype: str) -
         raise ExportInputError(f"{where} has incompatible class names")
 
 
-def resolve_frozen_run(run_id: str, runs_root: Path) -> RunResolution:
+def _resolve_frozen_run(run_id: str, runs_root: Path) -> RunResolution:
     """Resolve and fully validate one direct child of runs_root."""
     if not isinstance(run_id, str) or not _RUN_ID.fullmatch(run_id):
         raise ExportInputError("run-id must be a simple direct-child identifier")
@@ -269,7 +281,9 @@ def resolve_frozen_run(run_id: str, runs_root: Path) -> RunResolution:
     expected_name = f"ds_cnn_w{int(round(float(width) * 100)):03d}"
     if model_name != expected_name:
         raise ExportInputError("selected model name does not match width")
-    checkpoint_value = selected.get("checkpoint") or (selected.get("checkpoint_qat") if route == "qat" else selected.get("checkpoint_fp32"))
+    checkpoint_value = selected.get("checkpoint") or (
+        selected.get("checkpoint_qat") if route == "qat" else selected.get("checkpoint_fp32")
+    )
     tflite_value = selected.get("tflite") or selected.get("int8_artifact")
     checkpoint = _inside(run, checkpoint_value, "selected.checkpoint")
     tflite = _inside(run, tflite_value, "selected.tflite")
@@ -283,8 +297,19 @@ def resolve_frozen_run(run_id: str, runs_root: Path) -> RunResolution:
     resources = _mapping(_required(selected, "resources", "selected"), "selected.resources")
     resource_arena = resources.get("arena")
     if isinstance(resource_arena, Mapping):
-        resources = {**resources, "arena_total_bytes": resource_arena.get("total_bytes", resources.get("arena_total_bytes")), "arena_with_margin_bytes": resource_arena.get("with_margin_bytes", resources.get("arena_with_margin_bytes"))}
-    for resource_key in ("tflite_bytes", "arena_total_bytes", "arena_with_margin_bytes", "macs"):
+        resources = {
+            **resources,
+            "arena_total_bytes": resource_arena.get("total_bytes", resources.get("arena_total_bytes")),
+            "arena_with_margin_bytes": resource_arena.get(
+                "with_margin_bytes", resources.get("arena_with_margin_bytes")
+            ),
+        }
+    for resource_key in (
+        "tflite_bytes",
+        "arena_total_bytes",
+        "arena_with_margin_bytes",
+        "macs",
+    ):
         if not isinstance(resources.get(resource_key), int) or resources[resource_key] < 0:
             raise ExportInputError(f"selected.resources is missing {resource_key}")
     csv_info = _mapping(_required(manifest, "csv", "run manifest"), "manifest.csv")
@@ -376,15 +401,24 @@ def _restore_model(run: RunResolution) -> nn.Module:
     return model
 
 
-def _batches(dataset: Dataset[tuple[torch.Tensor, int]], batch_size: int) -> Sequence[tuple[torch.Tensor, torch.Tensor]]:
+def _batches(
+    dataset: Dataset[tuple[torch.Tensor, int]], batch_size: int
+) -> Sequence[tuple[torch.Tensor, torch.Tensor]]:
     values: list[tuple[torch.Tensor, torch.Tensor]] = []
     for start in range(0, len(dataset), batch_size):
         rows = [dataset[index] for index in range(start, min(start + batch_size, len(dataset)))]
-        values.append((torch.stack([row[0] for row in rows]), torch.tensor([row[1] for row in rows], dtype=torch.long)))
+        values.append(
+            (
+                torch.stack([row[0] for row in rows]),
+                torch.tensor([row[1] for row in rows], dtype=torch.long),
+            )
+        )
     return values
 
 
-def _torch_predictions(model: nn.Module, dataset: Dataset[tuple[torch.Tensor, int]], *, batch_size: int = 3) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[int]]:
+def _torch_predictions(
+    model: nn.Module, dataset: Dataset[tuple[torch.Tensor, int]], *, batch_size: int = 3
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[int]]:
     actual: list[int] = []
     logits: list[np.ndarray] = []
     batch_shapes: list[int] = []
@@ -401,7 +435,13 @@ def _torch_predictions(model: nn.Module, dataset: Dataset[tuple[torch.Tensor, in
 
 
 def _metrics(actual: np.ndarray, scores: np.ndarray, *, dtype: str) -> Metrics:
-    return metrics_from_predictions(actual, scores.argmax(axis=1), _softmax(scores), dtype=dtype, partition="PublicTest")
+    return metrics_from_predictions(
+        actual,
+        scores.argmax(axis=1),
+        _softmax(scores),
+        dtype=dtype,
+        partition="PublicTest",
+    )
 
 
 def _softmax(scores: np.ndarray) -> np.ndarray:
@@ -458,9 +498,19 @@ def _validate_onnx(path: Path, model: nn.Module, dataset: Dataset[tuple[torch.Te
         input_meta, output_meta = inputs[0], outputs[0]
         input_shape = list(input_meta.shape)
         output_shape = list(output_meta.shape)
-        if input_meta.name != "input" or input_meta.type != "tensor(float)" or input_shape[0] == 1 or input_shape[1:] != [1, 48, 48]:
+        if (
+            input_meta.name != "input"
+            or input_meta.type != "tensor(float)"
+            or input_shape[0] == 1
+            or input_shape[1:] != [1, 48, 48]
+        ):
             raise ValueError(f"invalid ONNX input contract: {input_meta.name}/{input_meta.type}/{input_meta.shape}")
-        if output_meta.name != "logits" or output_meta.type != "tensor(float)" or output_shape[0] == 1 or output_shape[1:] != [4]:
+        if (
+            output_meta.name != "logits"
+            or output_meta.type != "tensor(float)"
+            or output_shape[0] == 1
+            or output_shape[1:] != [4]
+        ):
             raise ValueError(f"invalid ONNX output contract: {output_meta.name}/{output_meta.type}/{output_meta.shape}")
         actual, torch_logits, torch_scores, batch_shapes = _torch_predictions(model, dataset, batch_size=3)
         onnx_logits: list[np.ndarray] = []
@@ -471,7 +521,11 @@ def _validate_onnx(path: Path, model: nn.Module, dataset: Dataset[tuple[torch.Te
             onnx_logits.append(np.asarray(value, dtype=np.float32))
         first_image = dataset[0][0].unsqueeze(0).numpy().astype(np.float32)
         dynamic_probe_shapes: list[int] = []
-        for probe_batch in (first_image, np.repeat(first_image, 2, axis=0), np.repeat(first_image, 1, axis=0)):
+        for probe_batch in (
+            first_image,
+            np.repeat(first_image, 2, axis=0),
+            np.repeat(first_image, 1, axis=0),
+        ):
             probe_output = session.run([output_meta.name], {input_meta.name: probe_batch})[0]
             dynamic_probe_shapes.append(int(probe_output.shape[0]))
         onnx_values = np.concatenate(onnx_logits, axis=0)
@@ -481,7 +535,9 @@ def _validate_onnx(path: Path, model: nn.Module, dataset: Dataset[tuple[torch.Te
         max_relative = float(relative.max(initial=0.0))
         predicted_torch = torch_logits.argmax(axis=1)
         predicted_onnx = onnx_values.argmax(axis=1)
-        if not np.allclose(torch_logits, onnx_values, atol=ONNX_ATOL, rtol=ONNX_RTOL) or not np.array_equal(predicted_torch, predicted_onnx):
+        if not np.allclose(torch_logits, onnx_values, atol=ONNX_ATOL, rtol=ONNX_RTOL) or not np.array_equal(
+            predicted_torch, predicted_onnx
+        ):
             raise ExportValidationError("PyTorch/ONNX PublicTest parity failed")
         return {
             "partition": "PublicTest",
@@ -492,9 +548,27 @@ def _validate_onnx(path: Path, model: nn.Module, dataset: Dataset[tuple[torch.Te
             "class_agreement": float(np.mean(predicted_torch == predicted_onnx)),
             "metrics_pytorch": _metrics(actual, torch_logits, dtype="float32").to_dict(),
             "metrics_onnx": _metrics(actual, onnx_values, dtype="float32").to_dict(),
-            "dynamic_batch": {"pytorch": batch_shapes, "onnx": onnx_shapes, "probes": dynamic_probe_shapes, "tested": sorted(set(onnx_shapes + dynamic_probe_shapes)), "unit": 1, "multiple": 2, "last_partial": dynamic_probe_shapes[-1]},
-            "input": {"name": input_meta.name, "dtype": input_meta.type, "shape": ["N", 1, 48, 48], "layout": "NCHW"},
-            "output": {"name": output_meta.name, "dtype": output_meta.type, "shape": ["N", 4], "kind": "scores/logits"},
+            "dynamic_batch": {
+                "pytorch": batch_shapes,
+                "onnx": onnx_shapes,
+                "probes": dynamic_probe_shapes,
+                "tested": sorted(set(onnx_shapes + dynamic_probe_shapes)),
+                "unit": 1,
+                "multiple": 2,
+                "last_partial": dynamic_probe_shapes[-1],
+            },
+            "input": {
+                "name": input_meta.name,
+                "dtype": input_meta.type,
+                "shape": ["N", 1, 48, 48],
+                "layout": "NCHW",
+            },
+            "output": {
+                "name": output_meta.name,
+                "dtype": output_meta.type,
+                "shape": ["N", 4],
+                "kind": "scores/logits",
+            },
         }
     except ExportValidationError:
         raise
@@ -561,18 +635,39 @@ def _inspection(value: Any) -> _TfliteInspection:
         if isinstance(raw, _Operator):
             operators.append(raw)
         elif isinstance(raw, Mapping):
-            operators.append(_Operator(str(raw.get("builtin", raw.get("op", ""))), int(raw.get("version", 0)), raw.get("custom_code")))
+            operators.append(
+                _Operator(
+                    str(raw.get("builtin", raw.get("op", ""))),
+                    int(raw.get("version", 0)),
+                    raw.get("custom_code"),
+                )
+            )
         else:
-            operators.append(_Operator(str(raw.builtin), int(raw.version), getattr(raw, "custom_code", None)))
-    activation = value.get("activation_dtypes", ()) if isinstance(value, Mapping) else getattr(value, "activation_dtypes", ())
+            operators.append(
+                _Operator(
+                    str(raw.builtin),
+                    int(raw.version),
+                    getattr(raw, "custom_code", None),
+                )
+            )
+    activation = (
+        value.get("activation_dtypes", ()) if isinstance(value, Mapping) else getattr(value, "activation_dtypes", ())
+    )
     arena = value.get("arena") if isinstance(value, Mapping) else getattr(value, "arena", None)
-    return _TfliteInspection(_contract(input_value, "input"), _contract(output_value, "output"), tuple(operators), tuple(_dtype_name(item) for item in activation), arena)
+    return _TfliteInspection(
+        _contract(input_value, "input"),
+        _contract(output_value, "output"),
+        tuple(operators),
+        tuple(_dtype_name(item) for item in activation),
+        arena,
+    )
 
 
 class _RealTfliteAdapter:
     def __init__(self) -> None:
         try:
             from .preflight import _DefaultToolchain
+
             self._toolchain = _DefaultToolchain()
         except Exception as exc:
             raise ExportValidationError(f"LiteRT adapter unavailable: {exc}") from exc
@@ -620,21 +715,40 @@ def _tflite_adapter() -> _TfliteAdapter:
 
 
 def _validate_tflite_contract(inspection: _TfliteInspection) -> None:
-    if inspection.input.shape != (1, 48, 48, 1) or inspection.input.dtype not in {"int8", "<class 'numpy.int8'>"}:
+    if inspection.input.shape != (1, 48, 48, 1) or inspection.input.dtype not in {
+        "int8",
+        "<class 'numpy.int8'>",
+    }:
         raise ExportValidationError(f"invalid TFLite input contract: {inspection.input}")
-    if inspection.output.shape != (1, 4) or inspection.output.dtype not in {"int8", "<class 'numpy.int8'>"}:
+    if inspection.output.shape != (1, 4) or inspection.output.dtype not in {
+        "int8",
+        "<class 'numpy.int8'>",
+    }:
         raise ExportValidationError(f"invalid TFLite output contract: {inspection.output}")
     for name, contract in (("input", inspection.input), ("output", inspection.output)):
         if not math.isfinite(contract.scale) or contract.scale <= 0:
             raise ExportValidationError(f"TFLite {name} scale must be finite and positive")
     if any("float" in dtype or "fp32" in dtype for dtype in inspection.activation_dtypes):
         raise ExportValidationError("TFLite computational graph contains FP32 activations")
-    unsupported = [operator for operator in inspection.operators if operator.custom_code is not None or operator.builtin not in ALLOWED_BUILTINS or operator.version < 1 or operator.version > MAX_OPERATOR_VERSIONS.get(operator.builtin, 0)]
+    unsupported = [
+        operator
+        for operator in inspection.operators
+        if operator.custom_code is not None
+        or operator.builtin not in ALLOWED_BUILTINS
+        or operator.version < 1
+        or operator.version > MAX_OPERATOR_VERSIONS.get(operator.builtin, 0)
+    ]
     if unsupported:
         raise ExportValidationError(f"unsupported TFLite operators: {unsupported}")
 
 
-def _tflite_predictions(run: RunResolution, model: nn.Module, dataset: Dataset[tuple[torch.Tensor, int]], inspection: _TfliteInspection, adapter: _TfliteAdapter) -> dict[str, Any]:
+def _tflite_predictions(
+    run: RunResolution,
+    model: nn.Module,
+    dataset: Dataset[tuple[torch.Tensor, int]],
+    inspection: _TfliteInspection,
+    adapter: _TfliteAdapter,
+) -> dict[str, Any]:
     actual: list[int] = []
     scores: list[np.ndarray] = []
     with torch.no_grad():
@@ -671,7 +785,14 @@ def _operator_payload(inspection: _TfliteInspection) -> dict[str, Any]:
     allowlist = sorted({operator.builtin for operator in inspection.operators})
     return {
         "schema": "tflite-operators/v1",
-        "operators": [{"builtin": op.builtin, "version": op.version, "custom_code": op.custom_code} for op in inspection.operators],
+        "operators": [
+            {
+                "builtin": op.builtin,
+                "version": op.version,
+                "custom_code": op.custom_code,
+            }
+            for op in inspection.operators
+        ],
         "resolver_allowlist": allowlist,
         "allowlist": allowlist,
         "max_versions": dict(MAX_OPERATOR_VERSIONS),
@@ -712,9 +833,15 @@ def _resource_payload(run: RunResolution, model: nn.Module, inspection: _TfliteI
         "resolver_allowlist": sorted({operator.builtin for operator in inspection.operators}),
         "arena_with_margin_bytes": arena_margin,
         "arena": {
-            "head_bytes": int((arena_section or {}).get("head_bytes", frozen.get("arena_head_bytes", 0))) if isinstance(arena_section, Mapping) else int(frozen.get("arena_head_bytes", 0)),
-            "temporary_bytes": int((arena_section or {}).get("temporary_bytes", frozen.get("arena_temporary_bytes", 0))) if isinstance(arena_section, Mapping) else int(frozen.get("arena_temporary_bytes", 0)),
-            "tail_bytes": int((arena_section or {}).get("tail_bytes", frozen.get("arena_tail_bytes", 0))) if isinstance(arena_section, Mapping) else int(frozen.get("arena_tail_bytes", 0)),
+            "head_bytes": int((arena_section or {}).get("head_bytes", frozen.get("arena_head_bytes", 0)))
+            if isinstance(arena_section, Mapping)
+            else int(frozen.get("arena_head_bytes", 0)),
+            "temporary_bytes": int((arena_section or {}).get("temporary_bytes", frozen.get("arena_temporary_bytes", 0)))
+            if isinstance(arena_section, Mapping)
+            else int(frozen.get("arena_temporary_bytes", 0)),
+            "tail_bytes": int((arena_section or {}).get("tail_bytes", frozen.get("arena_tail_bytes", 0)))
+            if isinstance(arena_section, Mapping)
+            else int(frozen.get("arena_tail_bytes", 0)),
             "total_bytes": arena_total,
             "margin": 0.20,
             "with_margin_bytes": arena_margin,
@@ -726,13 +853,13 @@ def _resource_payload(run: RunResolution, model: nn.Module, inspection: _TfliteI
 
 def _write_cpp(stage: Path, payload: bytes) -> None:
     tokens = [f"0x{byte:02x}" for byte in payload]
-    lines = [", ".join(tokens[index:index + 12]) for index in range(0, len(tokens), 12)]
+    lines = [", ".join(tokens[index : index + 12]) for index in range(0, len(tokens), 12)]
     (stage / "emotion_model_data.h").write_text(
         "#pragma once\n#include <cstddef>\n#include <cstdint>\n\nnamespace sentience_train {\nextern const std::uint8_t emotion_model_data[];\nextern const std::size_t emotion_model_data_len;\n}\n",
         encoding="utf-8",
     )
     (stage / "emotion_model_data.cc").write_text(
-        "#include \"emotion_model_data.h\"\n\nnamespace sentience_train {\nalignas(16) const std::uint8_t emotion_model_data[] = {\n    "
+        '#include "emotion_model_data.h"\n\nnamespace sentience_train {\nalignas(16) const std::uint8_t emotion_model_data[] = {\n    '
         + ",\n    ".join(lines)
         + "\n};\nconst std::size_t emotion_model_data_len = sizeof(emotion_model_data);\n}\n",
         encoding="utf-8",
@@ -762,7 +889,10 @@ def _payload_hashes(directory: Path) -> dict[str, dict[str, Any]]:
     for path in sorted(directory.rglob("*")):
         if path.is_file() and path.name != "manifest.json":
             relative = str(path.relative_to(directory)).replace(os.sep, "/")
-            result[relative] = {"sha256": sha256_file(path), "bytes": path.stat().st_size}
+            result[relative] = {
+                "sha256": sha256_file(path),
+                "bytes": path.stat().st_size,
+            }
     return result
 
 
@@ -786,7 +916,11 @@ def _verify_existing(destination: Path, identity: str) -> None:
         raise ExportCollisionError(f"existing export manifest is tampered: {destination}")
     payloads = _mapping(manifest.get("payloads"), "export manifest.payloads")
     expected_names = set(payloads)
-    actual_names = {str(path.relative_to(destination)).replace(os.sep, "/") for path in destination.rglob("*") if path.is_file() and path.name != "manifest.json"}
+    actual_names = {
+        str(path.relative_to(destination)).replace(os.sep, "/")
+        for path in destination.rglob("*")
+        if path.is_file() and path.name != "manifest.json"
+    }
     if actual_names != expected_names:
         raise ExportCollisionError(f"existing export is incomplete or has unexpected files: {destination}")
     for relative, info in payloads.items():
@@ -796,14 +930,70 @@ def _verify_existing(destination: Path, identity: str) -> None:
             raise ExportCollisionError(f"existing export payload is tampered: {relative}")
 
 
-def _common_payloads(stage: Path, run: RunResolution, format: str, identity: str, components: Mapping[str, Any]) -> None:
+def _common_payloads(
+    stage: Path,
+    run: RunResolution,
+    format: str,
+    identity: str,
+    components: Mapping[str, Any],
+) -> None:
     (stage / "labels.txt").write_text("\n".join(LABELS) + "\n", encoding="utf-8")
-    (stage / "preprocessing.json").write_text(json.dumps({"face": "already_localized", "grayscale": True, "height": 48, "width": 48, "augmentation": False, "normalized": "pixel / 127.5 - 1.0", "normalization_formula": "pixel / 127.5 - 1.0", "range": [-1.0, 1.0]}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    (stage / "input_contract.json").write_text(json.dumps({"dtype": "float32" if format == "onnx" else "int8", "layout": "NCHW" if format == "onnx" else "NHWC", "shape": ["N", 1, 48, 48] if format == "onnx" else [1, 48, 48, 1], "batch": "dynamic" if format == "onnx" else "fixed", "normalization": "pixel / 127.5 - 1.0"}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    (stage / "output_contract.json").write_text(json.dumps({"dtype": "float32" if format == "onnx" else "int8", "shape": ["N", 4] if format == "onnx" else [1, 4], "kind": "scores/logits"}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    (stage / "preprocessing.json").write_text(
+        json.dumps(
+            {
+                "face": "already_localized",
+                "grayscale": True,
+                "height": 48,
+                "width": 48,
+                "augmentation": False,
+                "normalized": "pixel / 127.5 - 1.0",
+                "normalization_formula": "pixel / 127.5 - 1.0",
+                "range": [-1.0, 1.0],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (stage / "input_contract.json").write_text(
+        json.dumps(
+            {
+                "dtype": "float32" if format == "onnx" else "int8",
+                "layout": "NCHW" if format == "onnx" else "NHWC",
+                "shape": ["N", 1, 48, 48] if format == "onnx" else [1, 48, 48, 1],
+                "batch": "dynamic" if format == "onnx" else "fixed",
+                "normalization": "pixel / 127.5 - 1.0",
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (stage / "output_contract.json").write_text(
+        json.dumps(
+            {
+                "dtype": "float32" if format == "onnx" else "int8",
+                "shape": ["N", 4] if format == "onnx" else [1, 4],
+                "kind": "scores/logits",
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
-def _write_manifest(stage: Path, run: RunResolution, format: str, identity: str, components: Mapping[str, Any], validation: Mapping[str, Any]) -> None:
+def _write_manifest(
+    stage: Path,
+    run: RunResolution,
+    format: str,
+    identity: str,
+    components: Mapping[str, Any],
+    validation: Mapping[str, Any],
+) -> None:
     payloads = _payload_hashes(stage)
     document = {
         "schema": EXPORT_SCHEMA,
@@ -813,8 +1003,28 @@ def _write_manifest(stage: Path, run: RunResolution, format: str, identity: str,
         "run_id": run.run_id,
         "format": format,
         "private_test_access": False,
-        "provenance": {"evidence": "PublicTest", "partition": "PublicTest", "public_test_index": str(run.public_index.relative_to(run.directory)).replace(os.sep, "/")},
-        "source": {"run": run.run_id, "manifest_sha256": run.source_manifest_sha256, "checkpoint": str(run.checkpoint.relative_to(run.directory)).replace(os.sep, "/"), "tflite": str(run.tflite.relative_to(run.directory)).replace(os.sep, "/"), "width": run.width, "seed": run.seed, "route": run.route, "dataset_sha256": run.manifest["csv"]["sha256"], "dataset_counts": run.manifest["csv"].get("partition_counts", {}), "configuration": run.manifest["configuration"], "git": run.manifest.get("git"), "training_lock_sha256": run.manifest.get("uv_lock_sha256"), "export_lock_sha256": components.get("uv_lock_sha256"), "devices": {"export": "cpu", "platform": platform.platform()}, "runtimes": {"python": sys.version, "torch": torch.__version__}},
+        "provenance": {
+            "evidence": "PublicTest",
+            "partition": "PublicTest",
+            "public_test_index": str(run.public_index.relative_to(run.directory)).replace(os.sep, "/"),
+        },
+        "source": {
+            "run": run.run_id,
+            "manifest_sha256": run.source_manifest_sha256,
+            "checkpoint": str(run.checkpoint.relative_to(run.directory)).replace(os.sep, "/"),
+            "tflite": str(run.tflite.relative_to(run.directory)).replace(os.sep, "/"),
+            "width": run.width,
+            "seed": run.seed,
+            "route": run.route,
+            "dataset_sha256": run.manifest["csv"]["sha256"],
+            "dataset_counts": run.manifest["csv"].get("partition_counts", {}),
+            "configuration": run.manifest["configuration"],
+            "git": run.manifest.get("git"),
+            "training_lock_sha256": run.manifest.get("uv_lock_sha256"),
+            "export_lock_sha256": components.get("uv_lock_sha256"),
+            "devices": {"export": "cpu", "platform": platform.platform()},
+            "runtimes": {"python": sys.version, "torch": torch.__version__},
+        },
         "validation": validation,
         "payloads": payloads,
     }
@@ -840,11 +1050,16 @@ def _publish(stage: Path, destination: Path, identity: str) -> bool:
     return False
 
 
-def _export_development_bundle(run_id: str, format: str, runs_root: Path = Path("runs"), exports_root: Path = Path("exports")) -> ExportResult:
+def _export_single_format_bundle(
+    run_id: str,
+    format: str,
+    runs_root: Path = Path("runs"),
+    exports_root: Path = Path("exports"),
+) -> ExportResult:
     """Create or reuse one immutable ONNX or TFLite development bundle."""
     if format not in {"onnx", "tflite"}:
         raise ExportInputError("format must be exactly 'onnx' or 'tflite'")
-    run = resolve_frozen_run(run_id, Path(runs_root))
+    run = _resolve_frozen_run(run_id, Path(runs_root))
     identity, components = _identity(run, format)
     destination = Path(exports_root).expanduser().resolve() / run_id / format
     if destination.exists():
@@ -869,14 +1084,56 @@ def _export_development_bundle(run_id: str, format: str, runs_root: Path = Path(
             adapter = _tflite_adapter()
             inspection = _inspection(adapter.inspect(model_path))
             _validate_tflite_contract(inspection)
-            (stage / "input_contract.json").write_text(json.dumps({"dtype": inspection.input.dtype, "layout": "NHWC", "shape": list(inspection.input.shape), "batch": "fixed", "scale": inspection.input.scale, "zero_point": inspection.input.zero_point, "normalization": "pixel / 127.5 - 1.0"}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-            (stage / "output_contract.json").write_text(json.dumps({"dtype": inspection.output.dtype, "shape": list(inspection.output.shape), "scale": inspection.output.scale, "zero_point": inspection.output.zero_point, "kind": "scores/logits"}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            (stage / "input_contract.json").write_text(
+                json.dumps(
+                    {
+                        "dtype": inspection.input.dtype,
+                        "layout": "NHWC",
+                        "shape": list(inspection.input.shape),
+                        "batch": "fixed",
+                        "scale": inspection.input.scale,
+                        "zero_point": inspection.input.zero_point,
+                        "normalization": "pixel / 127.5 - 1.0",
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (stage / "output_contract.json").write_text(
+                json.dumps(
+                    {
+                        "dtype": inspection.output.dtype,
+                        "shape": list(inspection.output.shape),
+                        "scale": inspection.output.scale,
+                        "zero_point": inspection.output.zero_point,
+                        "kind": "scores/logits",
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
             validation = _tflite_predictions(run, model, dataset, inspection, adapter)
-            (stage / "operators.json").write_text(json.dumps(_operator_payload(inspection), indent=2, sort_keys=True) + "\n", encoding="utf-8")
-            (stage / "resource_metadata.json").write_text(json.dumps(_resource_payload(run, model, inspection), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            (stage / "operators.json").write_text(
+                json.dumps(_operator_payload(inspection), indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            (stage / "resource_metadata.json").write_text(
+                json.dumps(_resource_payload(run, model, inspection), indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
             _write_cpp(stage, model_path.read_bytes())
-        validation = {**validation, "public_test_index_sha256": sha256_file(run.public_index), "private_test_access": False}
-        (stage / "validation.json").write_text(json.dumps(validation, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        validation = {
+            **validation,
+            "public_test_index_sha256": sha256_file(run.public_index),
+            "private_test_access": False,
+        }
+        (stage / "validation.json").write_text(
+            json.dumps(validation, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
         _write_manifest(stage, run, format, identity, components, validation)
         reused = _publish(stage, destination, identity)
         return ExportResult(run_id, format, destination, reused, identity)
@@ -896,16 +1153,9 @@ def export_frozen_run(
 ) -> ExportResult:
     """Export a frozen run through the single public development/release seam."""
     if format in {"onnx", "tflite"}:
-        return _export_development_bundle(run_id, format, runs_root=runs_root, exports_root=exports_root)
+        return _export_single_format_bundle(run_id, format, runs_root=runs_root, exports_root=exports_root)
     if format != "all":
         raise ExportInputError("format must be exactly 'all', 'onnx', or 'tflite'")
     from ._release import release_frozen_run
 
     return release_frozen_run(run_id, runs_root=Path(runs_root), exports_root=Path(exports_root))
-
-
-def export_development(run_id: str, format: str, runs_root: Path = Path("runs"), exports_root: Path = Path("exports")) -> ExportResult:
-    """Compatibility wrapper for the PublicTest-only development formats."""
-    if format not in {"onnx", "tflite"}:
-        raise ExportInputError("format must be exactly 'onnx' or 'tflite'")
-    return export_frozen_run(run_id, format, runs_root=runs_root, exports_root=exports_root)

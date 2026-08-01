@@ -10,7 +10,6 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
-import math
 import os
 import platform
 import shutil
@@ -24,10 +23,16 @@ import numpy as np
 import torch
 
 from .artifacts import sha256_file
-from .config import LABELS
+from .config import LABELS, QualityGatesConfig
 from .data import CANONICAL_FER2013_SHA256, EMOTION_TO_LABEL
 from .preflight import MAX_ARENA_BYTES, MAX_MACS, MAX_TFLITE_BYTES
-from .selection import Metrics, metrics_from_predictions
+from .metrics import (
+    Metrics,
+    evaluate_gates,
+    evaluate_resource_gates,
+    metrics_from_predictions,
+    write_confusion_reports,
+)
 
 
 BUNDLE_SCHEMA = "release-bundle/v1"
@@ -73,7 +78,10 @@ def _payload_hashes(directory: Path) -> dict[str, dict[str, Any]]:
     for path in sorted(directory.rglob("*")):
         if path.is_file() and path != directory / "manifest.json":
             relative = str(path.relative_to(directory)).replace(os.sep, "/")
-            payloads[relative] = {"sha256": sha256_file(path), "bytes": path.stat().st_size}
+            payloads[relative] = {
+                "sha256": sha256_file(path),
+                "bytes": path.stat().st_size,
+            }
     return payloads
 
 
@@ -101,7 +109,10 @@ def candidate_identity(run: Any) -> tuple[str, dict[str, Any]]:
         "seed": run.seed,
         "route": run.route,
         "model_name": run.model_name,
-        "selected": {"checkpoint": selected.get("checkpoint"), "tflite": selected.get("tflite")},
+        "selected": {
+            "checkpoint": selected.get("checkpoint"),
+            "tflite": selected.get("tflite"),
+        },
     }
     identity = _sha256_bytes(json.dumps(components, sort_keys=True, separators=(",", ":")).encode("utf-8"))
     return identity, components
@@ -126,12 +137,21 @@ def _verify_release_bundle(destination: Path, identity: str) -> dict[str, Any]:
     payloads = manifest.get("payloads")
     if not isinstance(payloads, Mapping):
         raise RuntimeError(f"existing release has no payload hashes: {destination}")
-    actual = {str(path.relative_to(destination)).replace(os.sep, "/") for path in destination.rglob("*") if path.is_file() and path != destination / "manifest.json"}
+    actual = {
+        str(path.relative_to(destination)).replace(os.sep, "/")
+        for path in destination.rglob("*")
+        if path.is_file() and path != destination / "manifest.json"
+    }
     if actual != set(payloads):
         raise RuntimeError(f"existing release payload set is incomplete or adulterated: {destination}")
     for relative, expected in payloads.items():
         path = destination / str(relative)
-        if not isinstance(expected, Mapping) or not path.is_file() or sha256_file(path) != expected.get("sha256") or path.stat().st_size != expected.get("bytes"):
+        if (
+            not isinstance(expected, Mapping)
+            or not path.is_file()
+            or sha256_file(path) != expected.get("sha256")
+            or path.stat().st_size != expected.get("bytes")
+        ):
             raise RuntimeError(f"existing release payload is adulterated: {relative}")
     for required in ("onnx", "tflite", "validation", "test", "report.md"):
         if not (destination / required).exists():
@@ -163,22 +183,28 @@ def _reserve(ledger: Path) -> None:
         ledger.mkdir(mode=0o700)
     except FileExistsError as exc:
         raise RuntimeError(f"PrivateTest access is already reserved without a reusable final bundle: {ledger}") from exc
-    _write_json(ledger / "reservation.json", {
-        "schema": ACCESS_SCHEMA,
-        "status": "reserved",
-        "candidate_identity": ledger.name,
-        "private_test_access": True,
-    })
+    _write_json(
+        ledger / "reservation.json",
+        {
+            "schema": ACCESS_SCHEMA,
+            "status": "reserved",
+            "candidate_identity": ledger.name,
+            "private_test_access": True,
+        },
+    )
 
 
 def _finalize_ledger(ledger: Path, status: str, bundle_manifest_sha256: str, test_accessed: bool) -> None:
-    _write_json(ledger / "finalization.json", {
-        "schema": ACCESS_SCHEMA,
-        "status": status,
-        "candidate_identity": ledger.name,
-        "private_test_access": test_accessed,
-        "bundle_manifest_sha256": bundle_manifest_sha256,
-    })
+    _write_json(
+        ledger / "finalization.json",
+        {
+            "schema": ACCESS_SCHEMA,
+            "status": status,
+            "candidate_identity": ledger.name,
+            "private_test_access": test_accessed,
+            "bundle_manifest_sha256": bundle_manifest_sha256,
+        },
+    )
 
 
 def _validate_release_configuration(run: Any) -> None:
@@ -187,9 +213,18 @@ def _validate_release_configuration(run: Any) -> None:
         raise ValueError("frozen run has no configuration")
     gates = configuration.get("quality_gates")
     if isinstance(gates, Mapping):
-        for key in ("accuracy", "macro_f1", "recall", "max_accuracy_delta", "tflite_bytes", "arena_with_margin_bytes", "macs"):
+        for key in (
+            "accuracy",
+            "macro_f1",
+            "recall",
+            "max_accuracy_delta",
+            "tflite_bytes",
+            "arena_with_margin_bytes",
+            "macs",
+        ):
             if key in gates and gates[key] != QUALITY_LIMITS[key]:
                 raise ValueError(f"frozen quality gate {key} is not the release limit")
+
 
 def _expected_private_counts(run: Any) -> dict[str, int]:
     csv_info = run.manifest.get("csv")
@@ -228,13 +263,24 @@ def _load_private_samples(run: Any) -> tuple[tuple[torch.Tensor, int], ...]:
                     if label is None:
                         continue
                     pixels = [int(value) for value in row[1].split()]
-                except (UnicodeDecodeError, csv.Error, StopIteration, ValueError, IndexError) as exc:
+                except (
+                    UnicodeDecodeError,
+                    csv.Error,
+                    StopIteration,
+                    ValueError,
+                    IndexError,
+                ) as exc:
                     raise ValueError(f"PrivateTest row {line_number} is invalid") from exc
                 if len(pixels) != 2304 or any(pixel < 0 or pixel > 255 for pixel in pixels):
                     raise ValueError(f"PrivateTest row {line_number} violates the frozen pixel contract")
                 label_name = LABELS[label]
                 found[label_name] += 1
-                samples.append((torch.tensor(pixels, dtype=torch.float32).reshape(1, 48, 48).div(127.5).sub(1.0), label))
+                samples.append(
+                    (
+                        torch.tensor(pixels, dtype=torch.float32).reshape(1, 48, 48).div(127.5).sub(1.0),
+                        label,
+                    )
+                )
     except OSError as exc:
         raise ValueError(f"cannot read PrivateTest: {exc}") from exc
     if found != expected or len(samples) != sum(expected.values()):
@@ -251,10 +297,22 @@ def _softmax(scores: np.ndarray) -> np.ndarray:
 
 
 def _metrics(y_true: Sequence[int], scores: np.ndarray, dtype: str) -> Metrics:
-    return metrics_from_predictions(y_true, scores.argmax(axis=1), _softmax(scores), dtype=dtype, partition="PrivateTest")
+    return metrics_from_predictions(
+        y_true,
+        scores.argmax(axis=1),
+        _softmax(scores),
+        dtype=dtype,
+        partition="PrivateTest",
+    )
 
 
-def _private_predictions(model: Any, tflite_path: Path, inspection: Any, adapter: Any, samples: Sequence[tuple[torch.Tensor, int]]) -> tuple[Metrics, Metrics, list[tuple[int, np.ndarray, np.ndarray]]]:
+def _private_predictions(
+    model: Any,
+    tflite_path: Path,
+    inspection: Any,
+    adapter: Any,
+    samples: Sequence[tuple[torch.Tensor, int]],
+) -> tuple[Metrics, Metrics, list[tuple[int, np.ndarray, np.ndarray]]]:
     reference_scores: list[np.ndarray] = []
     tflite_scores: list[np.ndarray] = []
     actual: list[int] = []
@@ -281,23 +339,16 @@ def _private_predictions(model: Any, tflite_path: Path, inspection: Any, adapter
 
 
 def _resource_gates(resource: Mapping[str, Any]) -> dict[str, Any]:
-    observed = {
-        "tflite_bytes": resource.get("tflite_bytes", resource.get("model_bytes")),
-        "arena_with_margin_bytes": resource.get("arena_with_margin_bytes"),
-        "macs": resource.get("macs"),
-        "arena_measurement": "host_estimate",
-        "esp32_s3_arena": "pending_external",
-        "esp32_s3_latency_p95": "pending_external",
-    }
-    reasons: list[str] = []
-    for key in ("tflite_bytes", "arena_with_margin_bytes", "macs"):
-        value = observed[key]
-        limit = QUALITY_LIMITS[key]
-        if not isinstance(value, int):
-            reasons.append(f"{key} is missing")
-        elif value > limit:
-            reasons.append(f"{key} {value} > {limit}")
-    return {"passed": not reasons, "observed": observed, "limits": {key: QUALITY_LIMITS[key] for key in ("tflite_bytes", "arena_with_margin_bytes", "macs")}, "reasons": reasons}
+    policy = QualityGatesConfig(
+        accuracy=QUALITY_LIMITS["accuracy"],
+        macro_f1=QUALITY_LIMITS["macro_f1"],
+        recall=QUALITY_LIMITS["recall"],
+        max_accuracy_delta=QUALITY_LIMITS["max_accuracy_delta"],
+        tflite_bytes=QUALITY_LIMITS["tflite_bytes"],
+        arena_with_margin_bytes=QUALITY_LIMITS["arena_with_margin_bytes"],
+        macs=QUALITY_LIMITS["macs"],
+    )
+    return evaluate_resource_gates(resource, policy).to_dict()
 
 
 def _build_handoffs(run: Any, stage: Path, identity: str) -> tuple[Any, Any, Any, dict[str, Any]]:
@@ -316,7 +367,16 @@ def _build_handoffs(run: Any, stage: Path, identity: str) -> tuple[Any, Any, Any
     development._onnx_adapter().export(model, onnx_path)
     onnx_validation = development._validate_onnx(onnx_path, model, public_dataset)
     _write_json(onnx_stage / "validation.json", onnx_validation)
-    _write_json(onnx_stage / "manifest.json", {"schema": "development-export-bundle/v1", "format": "onnx", "private_test_access": False, "identity": identity, "payloads": _payload_hashes(onnx_stage)})
+    _write_json(
+        onnx_stage / "manifest.json",
+        {
+            "schema": "development-export-bundle/v1",
+            "format": "onnx",
+            "private_test_access": False,
+            "identity": identity,
+            "payloads": _payload_hashes(onnx_stage),
+        },
+    )
 
     copied_run = replace(run, tflite=tflite_stage / "emotion_model_int8.tflite")
     copied_run.tflite.write_bytes(run.tflite.read_bytes())
@@ -324,94 +384,200 @@ def _build_handoffs(run: Any, stage: Path, identity: str) -> tuple[Any, Any, Any
     adapter = development._tflite_adapter()
     inspection = development._inspection(adapter.inspect(copied_run.tflite))
     development._validate_tflite_contract(inspection)
-    _write_json(tflite_stage / "input_contract.json", {"dtype": inspection.input.dtype, "layout": "NHWC", "shape": list(inspection.input.shape), "batch": "fixed", "scale": inspection.input.scale, "zero_point": inspection.input.zero_point, "normalization": "pixel / 127.5 - 1.0"})
-    _write_json(tflite_stage / "output_contract.json", {"dtype": inspection.output.dtype, "shape": list(inspection.output.shape), "scale": inspection.output.scale, "zero_point": inspection.output.zero_point, "kind": "scores/logits"})
+    _write_json(
+        tflite_stage / "input_contract.json",
+        {
+            "dtype": inspection.input.dtype,
+            "layout": "NHWC",
+            "shape": list(inspection.input.shape),
+            "batch": "fixed",
+            "scale": inspection.input.scale,
+            "zero_point": inspection.input.zero_point,
+            "normalization": "pixel / 127.5 - 1.0",
+        },
+    )
+    _write_json(
+        tflite_stage / "output_contract.json",
+        {
+            "dtype": inspection.output.dtype,
+            "shape": list(inspection.output.shape),
+            "scale": inspection.output.scale,
+            "zero_point": inspection.output.zero_point,
+            "kind": "scores/logits",
+        },
+    )
     tflite_validation = development._tflite_predictions(copied_run, model, public_dataset, inspection, adapter)
     _write_json(tflite_stage / "validation.json", tflite_validation)
     _write_json(tflite_stage / "operators.json", development._operator_payload(inspection))
     resource = development._resource_payload(copied_run, model, inspection)
     _write_json(tflite_stage / "resource_metadata.json", resource)
     development._write_cpp(tflite_stage, copied_run.tflite.read_bytes())
-    _write_json(tflite_stage / "manifest.json", {"schema": "development-export-bundle/v1", "format": "tflite", "private_test_access": False, "identity": identity, "payloads": _payload_hashes(tflite_stage)})
-    artifact_gates = {
-        "onnx_public_parity": {"passed": True, "observed": {"class_agreement": onnx_validation.get("class_agreement"), "max_absolute_error": onnx_validation.get("max_absolute_error")}, "limits": {"max_absolute_error": development.ONNX_ATOL, "max_relative_error": development.ONNX_RTOL}, "reasons": []},
-        "tflite_public_parity": {"passed": tflite_validation.get("class_agreement") == 1.0, "observed": {"class_agreement": tflite_validation.get("class_agreement"), "accuracy_delta": tflite_validation.get("accuracy_delta")}, "limits": {"class_agreement": 1.0, "max_accuracy_delta": QUALITY_LIMITS["max_accuracy_delta"]}, "reasons": [] if tflite_validation.get("class_agreement") == 1.0 else ["PyTorch/TFLite PublicTest class parity failed"], },
+    _write_json(
+        tflite_stage / "manifest.json",
+        {
+            "schema": "development-export-bundle/v1",
+            "format": "tflite",
+            "private_test_access": False,
+            "identity": identity,
+            "payloads": _payload_hashes(tflite_stage),
+        },
+    )
+    artifact_gates: dict[str, Any] = {
+        "onnx_public_parity": {
+            "passed": True,
+            "observed": {
+                "class_agreement": onnx_validation.get("class_agreement"),
+                "max_absolute_error": onnx_validation.get("max_absolute_error"),
+            },
+            "limits": {
+                "max_absolute_error": development.ONNX_ATOL,
+                "max_relative_error": development.ONNX_RTOL,
+            },
+            "reasons": [],
+        },
+        "tflite_public_parity": {
+            "passed": tflite_validation.get("class_agreement") == 1.0,
+            "observed": {
+                "class_agreement": tflite_validation.get("class_agreement"),
+                "accuracy_delta": tflite_validation.get("accuracy_delta"),
+            },
+            "limits": {
+                "class_agreement": 1.0,
+                "max_accuracy_delta": QUALITY_LIMITS["max_accuracy_delta"],
+            },
+            "reasons": []
+            if tflite_validation.get("class_agreement") == 1.0
+            else ["PyTorch/TFLite PublicTest class parity failed"],
+        },
         "resources": _resource_gates(resource),
     }
-    artifact_gates["passed"] = all(value.get("passed", False) for key, value in artifact_gates.items() if key != "passed")
-    validation = {"schema": "public-test-validation/v1", "partition": "PublicTest", "onnx": onnx_validation, "tflite": tflite_validation, "resource": resource, "gates": artifact_gates}
+    artifact_gates["passed"] = all(
+        value.get("passed", False) for key, value in artifact_gates.items() if key != "passed"
+    )
+    validation = {
+        "schema": "public-test-validation/v1",
+        "partition": "PublicTest",
+        "onnx": onnx_validation,
+        "tflite": tflite_validation,
+        "resource": resource,
+        "gates": artifact_gates,
+    }
     _write_json(stage / "validation" / "summary.json", validation)
-    _write_json(stage / "validation" / "metrics.json", {"schema": "public-test-metrics/v1", "partition": "PublicTest", "reference": onnx_validation.get("metrics_pytorch"), "tflite": tflite_validation.get("metrics_tflite")})
-    return model, adapter, inspection, {"validation": validation, "resource": resource, "gates": artifact_gates, "tflite_path": copied_run.tflite}
+    _write_json(
+        stage / "validation" / "metrics.json",
+        {
+            "schema": "public-test-metrics/v1",
+            "partition": "PublicTest",
+            "reference": onnx_validation.get("metrics_pytorch"),
+            "tflite": tflite_validation.get("metrics_tflite"),
+        },
+    )
+    return (
+        model,
+        adapter,
+        inspection,
+        {
+            "validation": validation,
+            "resource": resource,
+            "gates": artifact_gates,
+            "tflite_path": copied_run.tflite,
+        },
+    )
 
 
 def _quality_gates(reference: Metrics, tflite: Metrics) -> dict[str, Any]:
-    gates: dict[str, Any] = {}
-    for name, metrics in (("reference", reference), ("tflite", tflite)):
-        reasons: list[str] = []
-        if metrics.accuracy < QUALITY_LIMITS["accuracy"]:
-            reasons.append(f"accuracy {metrics.accuracy:.6f} < {QUALITY_LIMITS['accuracy']:.6f}")
-        if metrics.macro_f1 < QUALITY_LIMITS["macro_f1"]:
-            reasons.append(f"macro_f1 {metrics.macro_f1:.6f} < {QUALITY_LIMITS['macro_f1']:.6f}")
-        reasons.extend(f"recall[{label}] {value:.6f} < {QUALITY_LIMITS['recall']:.6f}" for label, value in zip(LABELS, metrics.recall_by_class) if value < QUALITY_LIMITS["recall"])
-        gates[name] = {"passed": not reasons, "observed": metrics.to_dict(), "limits": {"accuracy": QUALITY_LIMITS["accuracy"], "macro_f1": QUALITY_LIMITS["macro_f1"], "recall_by_class": QUALITY_LIMITS["recall"]}, "reasons": reasons}
+    policy = QualityGatesConfig(
+        accuracy=QUALITY_LIMITS["accuracy"],
+        macro_f1=QUALITY_LIMITS["macro_f1"],
+        recall=QUALITY_LIMITS["recall"],
+        max_accuracy_delta=QUALITY_LIMITS["max_accuracy_delta"],
+        tflite_bytes=QUALITY_LIMITS["tflite_bytes"],
+        arena_with_margin_bytes=QUALITY_LIMITS["arena_with_margin_bytes"],
+        macs=QUALITY_LIMITS["macs"],
+    )
+    reference_gate = evaluate_gates(reference, policy)
+    tflite_gate = evaluate_gates(tflite, policy, reference=reference)
     delta = reference.accuracy - tflite.accuracy
-    reasons = [] if delta <= QUALITY_LIMITS["max_accuracy_delta"] else [f"accuracy_delta {delta:.6f} > {QUALITY_LIMITS['max_accuracy_delta']:.6f}"]
-    gates["parity_quality"] = {"passed": not reasons, "observed": {"accuracy_delta": delta, "class_agreement": None}, "limits": {"max_accuracy_delta": QUALITY_LIMITS["max_accuracy_delta"]}, "reasons": reasons}
-    gates["passed"] = all(value["passed"] for key, value in gates.items() if key != "passed")
+    parity = {
+        "passed": delta <= policy.max_accuracy_delta,
+        "observed": {"accuracy_delta": delta, "class_agreement": None},
+        "limits": {"max_accuracy_delta": policy.max_accuracy_delta},
+        "reasons": []
+        if delta <= policy.max_accuracy_delta
+        else [f"accuracy_delta {delta:.6f} > {policy.max_accuracy_delta:.6f}"],
+    }
+    gates: dict[str, Any] = {
+        "reference": reference_gate.to_dict(),
+        "tflite": tflite_gate.to_dict(),
+        "parity_quality": parity,
+    }
+    gates["passed"] = all(value["passed"] for value in gates.values())
     return gates
 
 
-def _confusion_csv(path: Path, reference: Metrics | None, tflite: Metrics | None) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(("model", "actual", "predicted", "count"))
-        for name, metrics in (("reference", reference), ("tflite", tflite)):
-            matrix = metrics.confusion_matrix if metrics is not None else ((0,) * 4,) * 4
-            for actual, row in zip(LABELS, matrix):
-                for predicted, count in zip(LABELS, row):
-                    writer.writerow((name, actual, predicted, int(count)))
-
-
-def _confusion_png(path: Path, reference: Metrics | None, tflite: Metrics | None) -> None:
-    try:
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-    except Exception as exc:
-        raise RuntimeError(f"Matplotlib/Agg is unavailable: {exc}") from exc
-    figure, axes = plt.subplots(1, 2, figsize=(8.0, 3.6), dpi=120)
-    for axis, title, metrics in zip(axes, ("Reference", "TFLite"), (reference, tflite)):
-        matrix = np.asarray(metrics.confusion_matrix if metrics is not None else ((0,) * 4,) * 4)
-        axis.imshow(matrix, cmap="Blues", vmin=0, vmax=max(1, int(matrix.max())))
-        axis.set_title(title)
-        axis.set_xlabel("Predicted")
-        axis.set_ylabel("Actual")
-        axis.set_xticks(range(4), LABELS, rotation=35, ha="right")
-        axis.set_yticks(range(4), LABELS)
-        for row in range(4):
-            for column in range(4):
-                axis.text(column, row, str(int(matrix[row, column])), ha="center", va="center", color="black")
-    figure.tight_layout()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    figure.savefig(path, metadata={"Software": "sentience-train"})
-    plt.close(figure)
-
-
-def _write_report(path: Path, run: Any, status: str, validation: Mapping[str, Any], test: Mapping[str, Any], gates: Mapping[str, Any], diagnostics: Sequence[str]) -> None:
-    lines = ["# Release report", "", f"- Run: `{run.run_id}`", f"- Status: **{status}**", "", "## Validation (PublicTest)", "", "```json", json.dumps(validation, indent=2, sort_keys=True), "```", "", "## Final test (PrivateTest)", ""]
+def _write_report(
+    path: Path,
+    run: Any,
+    status: str,
+    validation: Mapping[str, Any],
+    test: Mapping[str, Any],
+    gates: Mapping[str, Any],
+    diagnostics: Sequence[str],
+) -> None:
+    lines = [
+        "# Release report",
+        "",
+        f"- Run: `{run.run_id}`",
+        f"- Status: **{status}**",
+        "",
+        "## Validation (PublicTest)",
+        "",
+        "```json",
+        json.dumps(validation, indent=2, sort_keys=True),
+        "```",
+        "",
+        "## Final test (PrivateTest)",
+        "",
+    ]
     if test.get("accessed"):
-        lines.extend(["PrivateTest was reserved and evaluated in memory. Predictions are not persisted.", "", "```json", json.dumps(test, indent=2, sort_keys=True), "```"])
+        lines.extend(
+            [
+                "PrivateTest was reserved and evaluated in memory. Predictions are not persisted.",
+                "",
+                "```json",
+                json.dumps(test, indent=2, sort_keys=True),
+                "```",
+            ]
+        )
     else:
         lines.append("PrivateTest was not accessed.")
-    lines.extend(["", "## Gates", "", "```json", json.dumps(gates, indent=2, sort_keys=True), "```"])
+    lines.extend(
+        [
+            "",
+            "## Gates",
+            "",
+            "```json",
+            json.dumps(gates, indent=2, sort_keys=True),
+            "```",
+        ]
+    )
     if diagnostics:
         lines.extend(["", "## Diagnostics", "", *[f"- {item}" for item in diagnostics]])
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def _write_root_manifest(stage: Path, run: Any, identity: str, components: Mapping[str, Any], status: str, test_accessed: bool, validation: Mapping[str, Any], test: Mapping[str, Any], gates: Mapping[str, Any], diagnostics: Sequence[str]) -> dict[str, Any]:
+def _write_root_manifest(
+    stage: Path,
+    run: Any,
+    identity: str,
+    components: Mapping[str, Any],
+    status: str,
+    test_accessed: bool,
+    validation: Mapping[str, Any],
+    test: Mapping[str, Any],
+    gates: Mapping[str, Any],
+    diagnostics: Sequence[str],
+) -> dict[str, Any]:
     access_path = stage / "test" / "access.json"
     metrics_path = stage / "test" / "metrics.json"
     payloads = _payload_hashes(stage)
@@ -438,8 +604,17 @@ def _write_root_manifest(stage: Path, run: Any, identity: str, components: Mappi
             "git_training": run.manifest.get("git"),
             "git_export": {"revision": RELEASE_REVISION, "lock_sha256": _lock_hash()},
             "uv_lock_sha256": _lock_hash(),
-            "dataset": {"sha256": run.manifest.get("csv", {}).get("sha256"), "canonical_sha256": CANONICAL_FER2013_SHA256, "counts": run.manifest.get("csv", {}).get("partition_counts"), "selected_class_counts": run.manifest.get("csv", {}).get("selected_class_counts")},
-            "runtimes": {"python": sys.version, "torch": torch.__version__, "platform": platform.platform()},
+            "dataset": {
+                "sha256": run.manifest.get("csv", {}).get("sha256"),
+                "canonical_sha256": CANONICAL_FER2013_SHA256,
+                "counts": run.manifest.get("csv", {}).get("partition_counts"),
+                "selected_class_counts": run.manifest.get("csv", {}).get("selected_class_counts"),
+            },
+            "runtimes": {
+                "python": sys.version,
+                "torch": torch.__version__,
+                "platform": platform.platform(),
+            },
             "devices": {"host": "cpu", "esp32_s3_latency_p95": "pending_external"},
         },
         "validation": dict(validation),
@@ -447,7 +622,10 @@ def _write_root_manifest(stage: Path, run: Any, identity: str, components: Mappi
         "gates": dict(gates),
         "diagnostics": list(diagnostics),
         "metrics": {"path": "test/metrics.json", "sha256": sha256_file(metrics_path)},
-        "access_marker": {"path": "test/access.json", "sha256": sha256_file(access_path)},
+        "access_marker": {
+            "path": "test/access.json",
+            "sha256": sha256_file(access_path),
+        },
         "payloads": payloads,
     }
     document["manifest_sha256"] = _sha256_bytes(_canonical_document(document))
@@ -461,20 +639,83 @@ def _lock_hash() -> str | None:
     return sha256_file(lock) if lock.is_file() else None
 
 
-def _finish_stage(stage: Path, run: Any, identity: str, components: Mapping[str, Any], status: str, test_accessed: bool, validation: Mapping[str, Any], reference: Metrics | None, tflite: Metrics | None, gates: Mapping[str, Any], diagnostics: Sequence[str]) -> dict[str, Any]:
-    test = {"schema": METRICS_SCHEMA, "partition": "PrivateTest", "accessed": bool(test_accessed), "reference": None if reference is None else reference.to_dict(), "tflite": None if tflite is None else tflite.to_dict()}
+def _finish_stage(
+    stage: Path,
+    run: Any,
+    identity: str,
+    components: Mapping[str, Any],
+    status: str,
+    test_accessed: bool,
+    validation: Mapping[str, Any],
+    reference: Metrics | None,
+    tflite: Metrics | None,
+    gates: Mapping[str, Any],
+    diagnostics: Sequence[str],
+) -> dict[str, Any]:
+    test = {
+        "schema": METRICS_SCHEMA,
+        "partition": "PrivateTest",
+        "accessed": bool(test_accessed),
+        "reference": None if reference is None else reference.to_dict(),
+        "tflite": None if tflite is None else tflite.to_dict(),
+    }
     _write_json(stage / "test" / "metrics.json", test)
-    _write_json(stage / "test" / "access.json", {"schema": ACCESS_SCHEMA, "status": status, "partition": "PrivateTest", "private_test_access": bool(test_accessed), "candidate_identity": identity, "counts": None if reference is None else dict(zip(LABELS, reference.support_by_class))})
-    _confusion_csv(stage / "test" / "confusion-matrix.csv", reference, tflite)
-    _confusion_png(stage / "test" / "confusion-matrix.png", reference, tflite)
+    _write_json(
+        stage / "test" / "access.json",
+        {
+            "schema": ACCESS_SCHEMA,
+            "status": status,
+            "partition": "PrivateTest",
+            "private_test_access": bool(test_accessed),
+            "candidate_identity": identity,
+            "counts": None if reference is None else dict(zip(LABELS, reference.support_by_class)),
+        },
+    )
+    write_confusion_reports(stage / "test", {"reference": reference, "tflite": tflite})
     _write_report(stage / "report.md", run, status, validation, test, gates, diagnostics)
-    return _write_root_manifest(stage, run, identity, components, status, test_accessed, validation, test, gates, diagnostics)
+    return _write_root_manifest(
+        stage,
+        run,
+        identity,
+        components,
+        status,
+        test_accessed,
+        validation,
+        test,
+        gates,
+        diagnostics,
+    )
 
 
-def _failed_result(run: Any, destination: Path, identity: str, components: Mapping[str, Any], stage: Path, validation: Mapping[str, Any], gates: Mapping[str, Any], diagnostics: Sequence[str], test_accessed: bool, reference: Metrics | None = None, tflite: Metrics | None = None, ledger: Path | None = None) -> Any:
+def _failed_result(
+    run: Any,
+    destination: Path,
+    identity: str,
+    components: Mapping[str, Any],
+    stage: Path,
+    validation: Mapping[str, Any],
+    gates: Mapping[str, Any],
+    diagnostics: Sequence[str],
+    test_accessed: bool,
+    reference: Metrics | None = None,
+    tflite: Metrics | None = None,
+    ledger: Path | None = None,
+) -> Any:
     from .export import ExportResult
 
-    manifest = _finish_stage(stage, run, identity, components, "failed", test_accessed, validation, reference, tflite, gates, diagnostics)
+    manifest = _finish_stage(
+        stage,
+        run,
+        identity,
+        components,
+        "failed",
+        test_accessed,
+        validation,
+        reference,
+        tflite,
+        gates,
+        diagnostics,
+    )
     reused = _publish(stage, destination, identity)
     if ledger is not None:
         _finalize_ledger(ledger, "failed", manifest["manifest_sha256"], test_accessed)
@@ -482,10 +723,15 @@ def _failed_result(run: Any, destination: Path, identity: str, components: Mappi
 
 
 def release_frozen_run(run_id: str, runs_root: Path, exports_root: Path) -> Any:
-    from . import export as development
-    from .export import ExportCollisionError, ExportInputError, ExportResult, ExportValidationError, resolve_frozen_run
+    from .export import (
+        ExportCollisionError,
+        ExportInputError,
+        ExportResult,
+        ExportValidationError,
+        _resolve_frozen_run,
+    )
 
-    run = resolve_frozen_run(run_id, runs_root)
+    run = _resolve_frozen_run(run_id, runs_root)
     csv_info = run.manifest.get("csv", {})
     if csv_info.get("sha256") != CANONICAL_FER2013_SHA256 or not csv_info.get("release_evidence", False):
         raise ExportInputError("complete release requires the canonical FER2013 SHA-256 and release evidence")
@@ -504,10 +750,20 @@ def release_frozen_run(run_id: str, runs_root: Path, exports_root: Path) -> Any:
             manifest = _verify_release_bundle(destination, identity)
         except RuntimeError as exc:
             raise ExportCollisionError(str(exc)) from exc
-        return ExportResult(run_id, "all", destination, True, identity, str(manifest["status"]), bool(manifest.get("test_accessed", False)))
+        return ExportResult(
+            run_id,
+            "all",
+            destination,
+            True,
+            identity,
+            str(manifest["status"]),
+            bool(manifest.get("test_accessed", False)),
+        )
     ledger = exports_base / run_id / ".private-test-access" / identity
     if ledger.exists():
-        raise ExportCollisionError(f"PrivateTest access ledger already exists without a reusable final bundle: {ledger}")
+        raise ExportCollisionError(
+            f"PrivateTest access ledger already exists without a reusable final bundle: {ledger}"
+        )
     stage = exports_base / ".staging" / f"{run_id}-all-{uuid.uuid4().hex}"
     stage.mkdir(parents=True, exist_ok=False)
     try:
@@ -518,33 +774,89 @@ def release_frozen_run(run_id: str, runs_root: Path, exports_root: Path) -> Any:
         except Exception as exc:
             shutil.rmtree(stage, ignore_errors=True)
             stage.mkdir(parents=True, exist_ok=False)
-            return _failed_result(run, destination, identity, components, stage, {}, {"passed": False, "artifact": {"passed": False, "reasons": [str(exc)]}}, [f"artifact gate failed before PrivateTest: {type(exc).__name__}: {exc}"], False)
+            return _failed_result(
+                run,
+                destination,
+                identity,
+                components,
+                stage,
+                {},
+                {"passed": False, "artifact": {"passed": False, "reasons": [str(exc)]}},
+                [f"artifact gate failed before PrivateTest: {type(exc).__name__}: {exc}"],
+                False,
+            )
         validation = built["validation"]
         gates = built["gates"]
         if not gates.get("passed", False):
-            return _failed_result(run, destination, identity, components, stage, validation, gates, ["one or more artifact/resource gates failed before PrivateTest"], False)
+            return _failed_result(
+                run,
+                destination,
+                identity,
+                components,
+                stage,
+                validation,
+                gates,
+                ["one or more artifact/resource gates failed before PrivateTest"],
+                False,
+            )
         try:
             _reserve(ledger)
         except RuntimeError as exc:
             raise ExportCollisionError(str(exc)) from exc
-        test_accessed = True
         try:
             samples = _load_private_samples(run)
             reference, tflite, rows = _private_predictions(_model, built["tflite_path"], inspection, adapter, samples)
             quality = _quality_gates(reference, tflite)
-            quality["parity_quality"]["observed"]["class_agreement"] = float(np.mean([int(np.argmax(ref) == np.argmax(edge)) for _label, ref, edge in rows]))
-            quality["parity_quality"]["passed"] = quality["parity_quality"]["passed"] and quality["parity_quality"]["observed"]["class_agreement"] == 1.0
+            quality["parity_quality"]["observed"]["class_agreement"] = float(
+                np.mean([int(np.argmax(ref) == np.argmax(edge)) for _label, ref, edge in rows])
+            )
+            quality["parity_quality"]["passed"] = (
+                quality["parity_quality"]["passed"] and quality["parity_quality"]["observed"]["class_agreement"] == 1.0
+            )
             if quality["parity_quality"]["observed"]["class_agreement"] != 1.0:
                 quality["parity_quality"]["reasons"].append("PyTorch/TFLite PrivateTest class parity failed")
-            gates = {**gates, "quality": quality, "passed": gates.get("passed", False) and quality.get("passed", False)}
+            gates = {
+                **gates,
+                "quality": quality,
+                "passed": gates.get("passed", False) and quality.get("passed", False),
+            }
             status = "accepted" if gates["passed"] else "failed"
-            diagnostics = [] if status == "accepted" else ["quality or final parity gates failed after PrivateTest access"]
-            manifest = _finish_stage(stage, run, identity, components, status, True, validation, reference, tflite, gates, diagnostics)
+            diagnostics = (
+                [] if status == "accepted" else ["quality or final parity gates failed after PrivateTest access"]
+            )
+            manifest = _finish_stage(
+                stage,
+                run,
+                identity,
+                components,
+                status,
+                True,
+                validation,
+                reference,
+                tflite,
+                gates,
+                diagnostics,
+            )
             reused = _publish(stage, destination, identity)
             _finalize_ledger(ledger, status, manifest["manifest_sha256"], True)
             return ExportResult(run_id, "all", destination, reused, identity, status, True)
         except Exception as exc:
-            return _failed_result(run, destination, identity, components, stage, validation, {**gates, "passed": False, "post_access": {"passed": False, "reasons": [str(exc)]}}, [f"release failed after PrivateTest reservation: {type(exc).__name__}: {exc}"], True, ledger=ledger)
+            return _failed_result(
+                run,
+                destination,
+                identity,
+                components,
+                stage,
+                validation,
+                {
+                    **gates,
+                    "passed": False,
+                    "post_access": {"passed": False, "reasons": [str(exc)]},
+                },
+                [f"release failed after PrivateTest reservation: {type(exc).__name__}: {exc}"],
+                True,
+                ledger=ledger,
+            )
     except ExportCollisionError:
         shutil.rmtree(stage, ignore_errors=True)
         raise

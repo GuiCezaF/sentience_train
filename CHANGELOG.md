@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Removed
+- Removed the legacy entrypoint, ImageFolder/pipeline/evaluation modules, `requirements.txt`, stale confusion-matrix PNG, and fallback metric/capture tests.
+- Removed public `evaluate`, `crossval`, `baseline`, and `compare` workflows, `export_development`, `model.name`, `training.seed`, `CompletedRun`, MiniVGG, and the distillation contingency.
+
+### Changed
+- `train` now creates only DS-CNN frozen runs; `export --run-id ID --format all|onnx|tflite` is the only export interface and `all` remains the default.
+- Configuration is strict and YAML/CSV based; ImageFolder and old imports are no longer supported. Existing `frozen-run/v1` artifacts, including manifests with historical teacher metadata, remain readable.
+- Metrics and report generation are centralized, with macro precision/recall, long confusion CSV, named JSON matrices, deterministic PNGs, host ESP32-S3 gates, and explicit pending hardware evidence.
+- Acceptance is excluded from the default pytest command and fails when `SENTIENCE_RELEASE_RUN_ID` or real inputs are absent.
+
 - Add immutable development ONNX and TFLite bundles for frozen runs, with
   PublicTest-only parity validation, atomic publication, and hash-checked reuse.
 - Add the complete `all` release bundle with versioned manifests, deterministic

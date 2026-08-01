@@ -3,34 +3,44 @@ from __future__ import annotations
 import pytest
 
 from sentience_train.config import QualityGatesConfig
-from sentience_train.selection import (
-    EarlyStopping,
+from sentience_train.metrics import (
     Metrics,
     ResourceMetrics,
-    SeedResult,
     evaluate_gates,
     metrics_from_predictions,
+)
+from sentience_train.selection import (
+    EarlyStopping,
+    SeedResult,
     representative_seed,
-    select_first_passing,
     should_run_qat,
     width_order,
 )
 
 
 def _metrics(accuracy: float = 0.8, macro_f1: float = 0.7, recall: float = 0.6) -> Metrics:
-    return metrics_from_predictions(
-        [0, 1, 2, 3] * 25,
-        [0, 1, 2, 3] * 25,
-        loss=0.2,
-    ) if accuracy == 1.0 else Metrics(
-        accuracy=accuracy,
-        macro_f1=macro_f1,
-        loss=0.2,
-        recall_by_class=(recall,) * 4,
-        precision_by_class=(recall,) * 4,
-        f1_by_class=(macro_f1,) * 4,
-        support_by_class=(25,) * 4,
-        confusion_matrix=((25, 0, 0, 0), (0, 25, 0, 0), (0, 0, 25, 0), (0, 0, 0, 25)),
+    return (
+        metrics_from_predictions(
+            [0, 1, 2, 3] * 25,
+            [0, 1, 2, 3] * 25,
+            loss=0.2,
+        )
+        if accuracy == 1.0
+        else Metrics(
+            accuracy=accuracy,
+            macro_f1=macro_f1,
+            loss=0.2,
+            recall_by_class=(recall,) * 4,
+            precision_by_class=(recall,) * 4,
+            f1_by_class=(macro_f1,) * 4,
+            support_by_class=(25,) * 4,
+            confusion_matrix=(
+                (25, 0, 0, 0),
+                (0, 25, 0, 0),
+                (0, 0, 25, 0),
+                (0, 0, 0, 25),
+            ),
+        )
     )
 
 
@@ -38,7 +48,18 @@ def _seed(seed: int, score: float) -> SeedResult:
     fp32 = _metrics()
     int8 = _metrics(macro_f1=score)
     gates = evaluate_gates(int8, QualityGatesConfig(), reference=fp32, resources=ResourceMetrics(1, 1, 1))
-    return SeedResult(0.25, seed, fp32, evaluate_gates(fp32, QualityGatesConfig()), int8, gates, ResourceMetrics(1, 1, 1), 0.0, "ptq", "passed")
+    return SeedResult(
+        0.25,
+        seed,
+        fp32,
+        evaluate_gates(fp32, QualityGatesConfig()),
+        int8,
+        gates,
+        ResourceMetrics(1, 1, 1),
+        0.0,
+        "ptq",
+        "passed",
+    )
 
 
 def test_early_stopping_requires_minimum_improvement_and_uses_loss_tie_break() -> None:
@@ -70,7 +91,12 @@ def test_representative_uses_median_and_lowest_seed_on_tie() -> None:
 
 @pytest.mark.parametrize(
     "accuracy_delta,conversion,expected",
-    [(None, True, True), (0.021, False, True), (0.020, False, False), (0.10, False, True)],
+    [
+        (None, True, True),
+        (0.021, False, True),
+        (0.020, False, False),
+        (0.10, False, True),
+    ],
 )
 def test_qat_has_only_the_two_authorized_triggers(accuracy_delta, conversion, expected) -> None:  # type: ignore[no-untyped-def]
     assert should_run_qat(ptq_conversion_failed=conversion, accuracy_delta=accuracy_delta) is expected
@@ -88,5 +114,19 @@ def test_gates_are_inclusive_at_exact_boundaries() -> None:
         support_by_class=(1,) * 4,
         confusion_matrix=((1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1)),
     )
-    result = evaluate_gates(metrics, gates, reference=Metrics(0.72, 0.7, 0.2, (0.6,) * 4, (0.6,) * 4, (0.7,) * 4, (1,) * 4, metrics.confusion_matrix), resources=ResourceMetrics(1_048_576, 1_572_864, 15_000_000))
+    result = evaluate_gates(
+        metrics,
+        gates,
+        reference=Metrics(
+            0.72,
+            0.7,
+            0.2,
+            (0.6,) * 4,
+            (0.6,) * 4,
+            (0.7,) * 4,
+            (1,) * 4,
+            metrics.confusion_matrix,
+        ),
+        resources=ResourceMetrics(1_048_576, 1_572_864, 15_000_000),
+    )
     assert result.passed, result.reasons
