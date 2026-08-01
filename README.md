@@ -1,51 +1,51 @@
 # sentience-train
 
-Treino determinístico e exportação imutável de um classificador FER2013 de quatro classes para ESP32-S3-CAM. Os únicos workflows públicos são `train` e `export`; a seleção cria exclusivamente candidatos DS-CNN.
+Deterministic training and immutable export of a four-class FER2013 classifier for the ESP32-S3-CAM. The only public workflows are `train` and `export`; selection creates DS-CNN candidates exclusively.
 
-## Pré-requisitos e instalação
+## Prerequisites and installation
 
-- Python **3.11.15** e uv **0.11.32**, fixados em `mise.toml`;
-- `mise` para provisionar as versões;
-- CSV FER2013 canônico e seus dados locais em `dataset/`;
-- CPU para validação host. CUDA é opcional para treino.
+- Python **3.11.15** and uv **0.11.32**, pinned in `mise.toml`;
+- `mise` to provision the versions;
+- the canonical FER2013 CSV and its local data in `dataset/`;
+- a CPU for host validation. CUDA is optional for training.
 
-A instalação é bloqueada pelo lockfile:
+Installation is locked by the lockfile:
 
 ```bash
 mise install
 uv sync --locked --group dev --group export
 ```
 
-O `uv.lock` deve ser usado sem alterações locais. O grupo `dev` inclui pytest, Ruff, mypy e stubs de YAML; `export` inclui ONNX, ONNX Runtime, Matplotlib/Agg e LiteRT/AI Edge.
+The `uv.lock` file must be used without local changes. The `dev` group includes pytest, Ruff, mypy, and YAML stubs; `export` includes ONNX, ONNX Runtime, Matplotlib/Agg, and LiteRT/AI Edge.
 
-## Dataset canônico
+## Canonical dataset
 
-O arquivo é um CSV UTF-8 com cabeçalho exato `emotion,pixels,Usage`. Cada registro possui 2.304 pixels inteiros entre 0 e 255, e `Usage` é `Training`, `PublicTest` ou `PrivateTest`. O SHA-256 de aceitação é:
+The file is a UTF-8 CSV with the exact header `emotion,pixels,Usage`. Each record contains 2,304 integer pixels between 0 and 255, and `Usage` is `Training`, `PublicTest`, or `PrivateTest`. The accepted SHA-256 is:
 
 ```text
 3b8d9617d1017f34733c8f2474d7784c563ce86c40a86ac12c2d37cc968f871b
 ```
 
-O mapeamento estável de emoções para a saída do modelo é `0 -> angry`, `3 -> happy`, `6 -> neutral`, `4 -> sad`. Os dados  não selecionados continuam na proveniência, mas somente as quatro classes canônicas entram no treino. `Training` é otimização; `PublicTest` é validação, early stopping, calibração e seleção; `PrivateTest` só pode ser lido uma vez pelo export completo de um run canônico explicitamente fornecido.
+The stable mapping from emotions to model outputs is `0 -> angry`, `3 -> happy`, `6 -> neutral`, and `4 -> sad`. Unselected data remains in the provenance, but only the four canonical classes are used for training. `Training` is used for optimization; `PublicTest` is used for validation, early stopping, calibration, and selection; `PrivateTest` may be read only once by a complete export of an explicitly supplied canonical run.
 
-## Configuração e seleção
+## Configuration and selection
 
-`configs/default.yaml` é a configuração canônica. O schema é estrito: chaves removidas como `model.name`, `training.seed` e toda a seção `distillation` são rejeitadas. A CLI permite apenas sobrescrever `training.epochs` entre 1 e 100 e `training.device` entre `auto`, `cpu` e `cuda`.
+`configs/default.yaml` is the canonical configuration. The schema is strict: removed keys such as `model.name`, `training.seed`, and the entire `distillation` section are rejected. The CLI only allows overriding `training.epochs` with a value from 1 through 100 and `training.device` with `auto`, `cpu`, or `cuda`.
 
-A seleção percorre widths `0.25`, `0.35`, `0.50`, nessa ordem, e seeds `42`, `43`, `44`. Ela para no primeiro width que passa todos os gates. O representante é a mediana de macro-F1 INT8, com menor seed como desempate. Cada treino usa early stopping por macro-F1, com loss como desempate, e restaura o melhor checkpoint. A perda é CrossEntropy com pesos de classe fixos por frequência inversa da raiz quadrada, normalizados pela média.
+Selection evaluates widths `0.25`, `0.35`, and `0.50`, in that order, with seeds `42`, `43`, and `44`. It stops at the first width that passes every gate. The representative is the median by INT8 macro-F1, with the lower seed as the tie-breaker. Each training run uses macro-F1 for early stopping, loss as the tie-breaker, and restores the best checkpoint. The loss is CrossEntropy with fixed class weights based on inverse square-root frequency and normalized by their mean.
 
-PTQ é tentada primeiro. QAT só é acionada pelos gatilhos de conversão PTQ ou perda de acurácia acima do limite; não há teacher, MiniVGG ou distilação. Se todos os DS-CNN falharem, o comando cria um diagnóstico imutável `candidate-comparison.json`/`.md`, não cria release e não acessa `PrivateTest`.
+PTQ is attempted first. QAT is triggered only by PTQ conversion failure or an accuracy loss above the limit; there is no teacher, MiniVGG, or distillation. If every DS-CNN candidate fails, the command creates an immutable `candidate-comparison.json`/`.md` diagnostic, creates no release, and does not access `PrivateTest`.
 
-## Treino
+## Training
 
 ```bash
 sentience-train train --config configs/default.yaml
 sentience-train train --config configs/default.yaml --epochs 10 --device cpu
 ```
 
-O resultado é um run imutável `runs/<id>/` com `manifest.json` no schema `frozen-run/v1`, configuração resolvida, hashes, índice de offsets do `PublicTest`, checkpoints, histórico JSONL, métricas e comparação de candidatos. Fixtures sintéticas são úteis para testes, mas nunca são evidência de release.
+The result is an immutable run in `runs/<id>/`, with a `manifest.json` that follows the `frozen-run/v1` schema, the resolved configuration, hashes, a `PublicTest` offset index, checkpoints, JSONL history, metrics, and candidate comparisons. Synthetic fixtures are useful for tests, but never serve as release evidence.
 
-## Exportação
+## Export
 
 ```bash
 sentience-train export --run-id <id>
@@ -53,41 +53,41 @@ sentience-train export --run-id <id> --format onnx --runs-dir ./runs
 sentience-train export --run-id <id> --format tflite --runs-dir ./runs
 ```
 
-`all` é o padrão e publica `exports/<id>/all/`. `onnx` e `tflite` são handoffs verificáveis derivados do mesmo run congelado. Nenhum formato altera o run; manifests e payloads são hash-checados e publicação/reuso é atômico.
+`all` is the default and publishes to `exports/<id>/all/`. `onnx` and `tflite` are verifiable handoffs derived from the same frozen run. No format modifies the run; manifests and payloads are hash-checked, and publication and reuse are atomic.
 
-### Handoff ONNX FP32
+### ONNX FP32 handoff
 
-- dtype `float32`;
-- layout NCHW `[N,1,48,48]`;
-- batch dinâmico;
-- normalização `pixel / 127.5 - 1`;
-- saída FP32 `[N,4]`;
-- validação de paridade host contra PyTorch e índice exclusivamente `PublicTest`.
+- `float32` dtype;
+- NCHW `[N,1,48,48]` layout;
+- dynamic batch;
+- `pixel / 127.5 - 1` normalization;
+- FP32 `[N,4]` output;
+- host parity validation against PyTorch using only the `PublicTest` index.
 
-### Handoff TFLite INT8
+### TFLite INT8 handoff
 
-- layout NHWC `[1,48,48,1]`;
-- batch fixo;
-- escala e zero-point são registrados em `input_contract.json`/`output_contract.json`;
-- `labels.txt`, allowlist de operadores e metadados de recursos acompanham o FlatBuffer;
-- `emotion_model_data.h` e `emotion_model_data.cc` são gerados do mesmo bytecode, com os mesmos labels e tamanho.
+- NHWC `[1,48,48,1]` layout;
+- fixed batch;
+- scale and zero point recorded in `input_contract.json`/`output_contract.json`;
+- `labels.txt`, an operator allowlist, and resource metadata shipped with the FlatBuffer;
+- `emotion_model_data.h` and `emotion_model_data.cc` generated from the same bytecode, with the same labels and size.
 
 ### ESP32-S3-CAM N8R8
 
-Os gates host verificam FlatBuffer até 1 MiB, arena com margem até 1,5 MiB e até 15 milhões de MACs. Medição real de arena e p95 de 200 ms no ESP32 permanecem `pending_external`; não são apresentados como aprovados por uma estimativa host.
+Host gates enforce a FlatBuffer size of at most 1 MiB, an arena estimate with margin of at most 1.5 MiB, and at most 15 million MACs. Actual arena measurement and a p95 latency of 200 ms on the ESP32 remain `pending_external`; a host estimate is not presented as approval.
 
-## Métricas e relatórios
+## Metrics and reports
 
-`sentience_train.metrics` é o único módulo de métricas usado por treino, seleção e release. Cada documento inclui accuracy, macro-precision, macro-recall, macro-F1, loss, precision/recall/F1 por classe, suporte e matriz bruta com ordem `angry,happy,neutral,sad`. Matrizes JSON usam `labels` e `matrices` nomeadas; CSV usa o formato longo `model,actual,predicted,count`; PNG é renderizado com Matplotlib/Agg de forma byte-determinística.
+`sentience_train.metrics` is the only metrics module used by training, selection, and release. Each document includes accuracy, macro-precision, macro-recall, macro-F1, loss, per-class precision/recall/F1, support, and the raw matrix in `angry,happy,neutral,sad` order. JSON matrices use `labels` and named `matrices`; CSV uses the long format `model,actual,predicted,count`; PNG is rendered with Matplotlib/Agg in a byte-deterministic manner.
 
-O release mantém evidências `PublicTest` e `PrivateTest` separadas. `PrivateTest` não é salvo como previsões: somente métricas, suporte, matriz e marcador de acesso são persistidos. Status finais são honestamente `accepted` ou `failed`, com gates, hashes e diagnóstico.
+The release keeps `PublicTest` and `PrivateTest` evidence separate. `PrivateTest` predictions are not saved: only metrics, support, the matrix, and an access marker are persisted. Final statuses are accurately reported as `accepted` or `failed`, with gates, hashes, and diagnostics.
 
-## Aceitação real e integridade
+## Real acceptance and integrity
 
-A aceitação nunca faz parte da suíte padrão (`pytest` usa `-m 'not acceptance'`). Para executá-la, forneça explicitamente `SENTIENCE_RELEASE_RUN_ID` e, opcionalmente, `SENTIENCE_RELEASE_RUNS_ROOT`/`SENTIENCE_RELEASE_EXPORTS_ROOT`:
+Acceptance is never part of the default suite (`pytest` uses `-m 'not acceptance'`). To run it, explicitly provide `SENTIENCE_RELEASE_RUN_ID` and, optionally, `SENTIENCE_RELEASE_RUNS_ROOT`/`SENTIENCE_RELEASE_EXPORTS_ROOT`:
 
 ```bash
 SENTIENCE_RELEASE_RUN_ID=<id> pytest -m acceptance tests/test_release_acceptance.py
 ```
 
-Sem o run e os insumos reais, `pytest -m acceptance` falha; não há skip nem fallback sintético. O export `all` só autoriza `PrivateTest` após validar schema `frozen-run/v1`, SHA-256 do CSV canônico, índice PublicTest, checkpoint, TFLite, operadores e gates host. Runs congelados anteriores, inclusive manifests que registram teacher, continuam consumíveis; a remoção afeta apenas a criação de novos runs.
+Without the real run and inputs, `pytest -m acceptance` fails; there is no skip or synthetic fallback. The `all` export authorizes `PrivateTest` only after validating the `frozen-run/v1` schema, the canonical CSV SHA-256, the PublicTest index, the checkpoint, TFLite, operators, and host gates. Earlier frozen runs, including manifests that record a teacher, remain consumable; the removal affects only the creation of new runs.

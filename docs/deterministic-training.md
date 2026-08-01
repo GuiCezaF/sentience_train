@@ -1,22 +1,22 @@
-# Treinamento determinístico FER2013
+# Deterministic FER2013 training
 
-O workflow público é `sentience-train train --config PATH`. Ele lê somente
-`Training` para otimização e `PublicTest` para validação, early stopping,
-calibração e seleção. `PrivateTest` permanece apenas na proveniência do CSV e
-não é materializado pelo engine.
+The public workflow is `sentience-train train --config PATH`. It reads only
+`Training` for optimization and `PublicTest` for validation, early stopping,
+calibration, and selection. `PrivateTest` remains only in the CSV provenance
+and is not materialized by the engine.
 
-A seleção percorre DS-CNN `w025`, `w035`, `w050` e seeds `42,43,44`, parando no
-primeiro width aprovado. PTQ precede QAT; QAT só responde aos gatilhos de
-conversão ou queda de accuracy. Não existe teacher nem distilação para novos
-runs. Se todos os candidatos falharem, o run imutável termina com
-`selection_failed`, diagnóstico completo e nenhum acesso a `PrivateTest`.
+Selection evaluates DS-CNN `w025`, `w035`, and `w050` with seeds `42,43,44`,
+stopping at the first approved width. PTQ precedes QAT; QAT responds only to
+conversion-failure or accuracy-loss triggers. New runs have no teacher or
+distillation. If every candidate fails, the immutable run ends with
+`selection_failed`, a complete diagnostic, and no `PrivateTest` access.
 
-A entrada é o CSV FER2013 canônico, validado por schema e SHA-256; as classes
-de saída são `angry,happy,neutral,sad`, com mapeamento bruto `0,3,6,4`. A
-normalização é `pixel / 127.5 - 1`, e os pesos de classe usam frequência
-inversa da raiz quadrada, normalizada pela média.
+The input is the canonical FER2013 CSV, validated by schema and SHA-256; the
+output classes are `angry,happy,neutral,sad`, with the raw mapping `0,3,6,4`.
+Normalization is `pixel / 127.5 - 1`, and class weights use inverse square-root
+frequency normalized by the mean.
 
-Cada run contém configuração resolvida, índice congelado de `PublicTest`,
-checkpoints, histórico, métricas, comparação de candidatos, hashes e manifesto
-`frozen-run/v1`. Runs anteriores válidos continuam consumíveis pelo export,
-mesmo que registrem metadados históricos de teacher.
+Each run contains the resolved configuration, a frozen `PublicTest` index,
+checkpoints, history, metrics, candidate comparisons, hashes, and a
+`frozen-run/v1` manifest. Valid earlier runs remain consumable by the export,
+even if they record historical teacher metadata.
