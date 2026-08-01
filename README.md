@@ -9,14 +9,58 @@ Deterministic training and immutable export of a four-class FER2013 classifier f
 - the canonical FER2013 CSV and its local data in `dataset/`;
 - a CPU for host validation. CUDA is optional for training.
 
-Installation is locked by the lockfile:
+### Full training and export environment
+
+The complete locked environment requires Linux x86-64 or macOS ARM64 because
+`litert-torch` depends on `litert-converter`, whose pinned release does not
+publish a Windows wheel. Install it with:
 
 ```bash
 mise install
 uv sync --locked --group dev --group export
 ```
 
-The `uv.lock` file must be used without local changes. The `dev` group includes pytest, Ruff, mypy, and YAML stubs; `export` includes ONNX, ONNX Runtime, Matplotlib/Agg, and LiteRT/AI Edge.
+The `uv.lock` file must be used without local changes. The `dev` group includes pytest, Ruff, mypy, YAML stubs, and Matplotlib/Agg for report tests; `export` includes ONNX, ONNX Runtime, Matplotlib/Agg, and LiteRT/AI Edge.
+
+### Windows
+
+Native Windows supports development tooling and unit tests, but not the
+LiteRT conversion preflight required by the canonical `train` and `export`
+workflows. PyTorch training stages support NVIDIA GPUs: the project selects the
+official CUDA 13.0 wheels for `torch` and `torchvision` on Windows. From
+PowerShell, install the compatible environment with:
+
+```powershell
+mise install
+(&mise activate pwsh) | Out-String | Invoke-Expression
+uv sync --locked --group dev
+uv run pytest
+```
+
+Verify CUDA before starting a training stage:
+
+```powershell
+uv run python -c "import torch; print(torch.__version__, torch.cuda.get_device_name(0), torch.cuda.is_available())"
+sentience-train train --config configs/default.yaml --device cuda
+```
+
+Do not add `--group export` on native Windows: `litert-converter==0.3.0` has no
+source distribution or `win_amd64` wheel. The `uv` suggestion to add Windows to
+`tool.uv.required-environments` does not make that package installable.
+
+The repository may remain on the Windows `C:` drive when the complete workflow
+is run through WSL or a Linux container. Keep the environments separate because
+virtual environments are not portable between Windows and Linux. For example,
+from WSL with the repository mounted under `/mnt/c`:
+
+```bash
+cd /mnt/c/Users/<user>/path/to/sentience_train
+export UV_PROJECT_ENVIRONMENT=.venv-linux
+uv sync --locked --group dev --group export
+```
+
+Windows can continue to use the default `.venv`; never reuse that directory
+from WSL or a container.
 
 ## Canonical dataset
 

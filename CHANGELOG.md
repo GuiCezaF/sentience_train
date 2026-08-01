@@ -7,6 +7,9 @@
 - Removed public `evaluate`, `crossval`, `baseline`, and `compare` workflows, `export_development`, `model.name`, `training.seed`, `CompletedRun`, MiniVGG, and the distillation contingency.
 
 ### Changed
+- Windows resolves `torch` and `torchvision` from PyTorch's CUDA 13.0 index,
+  enabling NVIDIA RTX acceleration while preserving deterministic cuBLAS
+  workspace configuration during training.
 - `train` now creates only DS-CNN frozen runs; `export --run-id ID --format all|onnx|tflite` is the only export interface and `all` remains the default.
 - Configuration is strict and YAML/CSV based; ImageFolder and old imports are no longer supported. Existing `frozen-run/v1` artifacts, including manifests with historical teacher metadata, remain readable.
 - Metrics and report generation are centralized, with macro precision/recall, long confusion CSV, named JSON matrices, deterministic PNGs, host ESP32-S3 gates, and explicit pending hardware evidence.

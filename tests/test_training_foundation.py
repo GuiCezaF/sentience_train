@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import os
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 
@@ -9,6 +10,7 @@ import yaml
 
 from sentience_train.config import ConfigError, load_config
 from sentience_train.data import DataValidationError, load_training_data
+from sentience_train.engine import seed_everything
 
 
 def _config(tmp_path: Path, csv_path: Path) -> Path:
@@ -94,3 +96,9 @@ def test_csv_reports_invalid_pixel_with_context(tmp_path: Path) -> None:
         csv.writer(handle).writerows(rows)
     with pytest.raises(DataValidationError, match="line 2, field pixels"):
         load_training_data(load_config(_config(tmp_path, path)).data)
+
+
+def test_training_configures_deterministic_cublas_workspace(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("CUBLAS_WORKSPACE_CONFIG", raising=False)
+    seed_everything(42)
+    assert os.environ["CUBLAS_WORKSPACE_CONFIG"] == ":4096:8"

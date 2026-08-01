@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import math
+import os
 import platform
 import random
 import sys
@@ -154,6 +155,9 @@ class _FakeQuantizedModel(nn.Module):
 
 
 def seed_everything(seed: int) -> None:
+    # Required by deterministic CUDA matrix operations. Preserve an explicit
+    # user choice while providing PyTorch's recommended deterministic default.
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
