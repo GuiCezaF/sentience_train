@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 
@@ -69,6 +70,7 @@ def main(argv: list[str] | None = None) -> int:
     }
     try:
         config = load_config(args.config, overrides)
+        logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
         completed = run_training(config)
     except (ConfigError, DataValidationError) as exc:
         print(f"configuration/data error: {exc}", file=sys.stderr)

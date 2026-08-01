@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import logging
 from pathlib import Path
 
 import torch
@@ -103,10 +104,13 @@ def _quantize(model, calibration, destination, route, width, seed):  # type: ign
 
 def test_selection_freezes_first_width_and_uses_explicit_model_factory(
     tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     _write_csv(tmp_path / "fer.csv")
     _write_config(tmp_path / "config.yaml")
     config = load_config(tmp_path / "config.yaml")
+    caplog.set_level(logging.INFO, logger="sentience_train.engine")
     names: list[tuple[str, int]] = []
 
     def factory(model_name: str, num_classes: int) -> torch.nn.Module:
@@ -121,6 +125,14 @@ def test_selection_freezes_first_width_and_uses_explicit_model_factory(
     assert manifest["status"] == "frozen"
     assert manifest["csv"]["private_test_access"] is False
     assert "teacher" not in manifest
+    assert "Training device: cpu (requested: cpu)" in caplog.text
+    assert "FP32 w=0.25 seed=42" in capsys.readouterr().err
+    selection_log = [
+        json.loads(line)
+        for line in (frozen.directory / "logs" / "selection.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert selection_log[0]["device"] == "cpu"
+    assert selection_log[0]["requested_device"] == "cpu"
 
 
 def test_all_candidates_fail_with_immutable_diagnosis_and_no_private_test(

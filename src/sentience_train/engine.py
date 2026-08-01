@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import logging
 import math
 import platform
 import random
@@ -19,6 +20,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
 
 from .artifacts import (
     RunStaging,
@@ -60,6 +62,9 @@ from .selection import (
     should_run_qat,
     width_order,
 )
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
@@ -252,6 +257,7 @@ def _train_epochs(
     device: torch.device,
     *,
     max_epochs: int,
+    progress_label: str,
     learning_rate: float | None = None,
 ) -> _TrainingResult:
     weights = _class_weights(data.train_labels).to(device)
@@ -268,44 +274,61 @@ def _train_epochs(
     checkpoint.parent.mkdir(parents=True, exist_ok=True)
     history_path.parent.mkdir(parents=True, exist_ok=True)
     history_path.write_text("", encoding="utf-8")
-    for epoch in range(1, max_epochs + 1):
-        model.train()
-        train_loss_sum = 0.0
-        train_examples = 0
-        for images, labels in train_loader:
-            images, labels = images.to(device, dtype=torch.float32), labels.to(device)
-            optimizer.zero_grad(set_to_none=True)
-            logits = model(images)
-            loss = criterion(logits, labels)
-            loss.backward()
-            optimizer.step()
-            train_loss_sum += float(loss.item()) * labels.size(0)
-            train_examples += labels.size(0)
-        validation = _validate(model, validation_loader, criterion, device)
-        scheduler.step()
-        row = {
-            "epoch": epoch,
-            "train_loss": train_loss_sum / max(train_examples, 1),
-            "validation_loss": validation.loss,
-            "macro_f1": validation.macro_f1,
-            "accuracy": validation.accuracy,
-            "learning_rate": optimizer.param_groups[0]["lr"],
-        }
-        append_jsonl(history_path, row)
-        if stopper.update(epoch, validation.macro_f1, validation.loss):
-            torch.save(
-                {
-                    "epoch": epoch,
-                    "model_state_dict": model.state_dict(),
-                    "optimizer_state_dict": optimizer.state_dict(),
-                    "macro_f1": validation.macro_f1,
-                    "validation_loss": validation.loss,
-                    "seed": seed,
-                },
-                checkpoint,
+    progress = tqdm(
+        total=max_epochs * len(train_loader),
+        desc=progress_label,
+        unit="batch",
+        dynamic_ncols=True,
+    )
+    try:
+        for epoch in range(1, max_epochs + 1):
+            model.train()
+            train_loss_sum = 0.0
+            train_examples = 0
+            for images, labels in train_loader:
+                images, labels = images.to(device, dtype=torch.float32), labels.to(device)
+                optimizer.zero_grad(set_to_none=True)
+                logits = model(images)
+                loss = criterion(logits, labels)
+                loss.backward()
+                optimizer.step()
+                train_loss_sum += float(loss.item()) * labels.size(0)
+                train_examples += labels.size(0)
+                progress.update(1)
+            validation = _validate(model, validation_loader, criterion, device)
+            scheduler.step()
+            train_loss = train_loss_sum / max(train_examples, 1)
+            row = {
+                "epoch": epoch,
+                "train_loss": train_loss,
+                "validation_loss": validation.loss,
+                "macro_f1": validation.macro_f1,
+                "accuracy": validation.accuracy,
+                "learning_rate": optimizer.param_groups[0]["lr"],
+            }
+            append_jsonl(history_path, row)
+            progress.set_postfix(
+                epoch=f"{epoch}/{max_epochs}",
+                loss=f"{train_loss:.4f}",
+                val_loss=f"{validation.loss:.4f}",
+                macro_f1=f"{validation.macro_f1:.4f}",
             )
-        if stopper.should_stop:
-            break
+            if stopper.update(epoch, validation.macro_f1, validation.loss):
+                torch.save(
+                    {
+                        "epoch": epoch,
+                        "model_state_dict": model.state_dict(),
+                        "optimizer_state_dict": optimizer.state_dict(),
+                        "macro_f1": validation.macro_f1,
+                        "validation_loss": validation.loss,
+                        "seed": seed,
+                    },
+                    checkpoint,
+                )
+            if stopper.should_stop:
+                break
+    finally:
+        progress.close()
     selected = torch.load(checkpoint, map_location=device, weights_only=False)
     model.load_state_dict(selected["model_state_dict"])
     # Save the restored state, making the checkpoint self-describing.
@@ -518,6 +541,7 @@ def _qat_train(
     checkpoint: Path,
     history: Path,
     device: torch.device,
+    width: float,
 ) -> _TrainingResult:
     base = copy.deepcopy(fp32.model).to(device)
     qat = _FakeQuantizedModel(base).to(device)
@@ -530,6 +554,7 @@ def _qat_train(
         history,
         device,
         max_epochs=config.quantization.qat.epochs,
+        progress_label=f"QAT w={width:.2f} seed={seed}",
         learning_rate=config.quantization.qat.lr,
     )
     normal = copy.deepcopy(fp32.model).to(device)
@@ -564,6 +589,7 @@ def _seed_result(
         history,
         device,
         max_epochs=config.training.epochs,
+        progress_label=f"FP32 w={width:.2f} seed={seed}",
     )
     _write_metrics(fp32_metrics_path, fp32.metrics)
     fp32_gate = evaluate_gates(fp32.metrics, config.quality_gates)
@@ -668,7 +694,7 @@ def _seed_result(
     qat_checkpoint = seed_directory / "checkpoints" / "qat.pt"
     qat_history = seed_directory / "metrics" / "qat-history.jsonl"
     try:
-        qat = _qat_train(config, data, fp32, seed, qat_checkpoint, qat_history, device)
+        qat = _qat_train(config, data, fp32, seed, qat_checkpoint, qat_history, device, width)
         qat_result = _quantize(
             config,
             data,
@@ -1005,6 +1031,7 @@ def _run_selection(
     preflight_runner: Callable[[AppConfig, TrainingData, Path], dict] | None = None,
 ) -> FrozenRun:
     device = _device(config.training.device)
+    LOGGER.info("Training device: %s (requested: %s)", device, config.training.device)
     data = load_training_data(config.data, config.augmentation)
     staging = RunStaging.create(config.run.directory)
     staging.write_resolved_config(config.resolved_dict())
@@ -1020,6 +1047,8 @@ def _run_selection(
         {
             "event": "selection_started",
             "run_id": staging.run_id,
+            "device": str(device),
+            "requested_device": config.training.device,
             "private_test_access": False,
         },
     )

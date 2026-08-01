@@ -43,6 +43,8 @@ sentience-train train --config configs/default.yaml
 sentience-train train --config configs/default.yaml --epochs 10 --device cpu
 ```
 
+The command logs the resolved training device (for example, `cuda` or `cpu`) and displays batch progress for each FP32 or QAT candidate, including the current epoch, training loss, validation loss, and macro-F1. The resolved and requested devices are also persisted in `logs/selection.jsonl`.
+
 The result is an immutable run in `runs/<id>/`, with a `manifest.json` that follows the `frozen-run/v1` schema, the resolved configuration, hashes, a `PublicTest` offset index, checkpoints, JSONL history, metrics, and candidate comparisons. Synthetic fixtures are useful for tests, but never serve as release evidence.
 
 ## Export

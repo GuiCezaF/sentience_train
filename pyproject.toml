@@ -10,6 +10,7 @@ dependencies = [
   "scikit-learn>=1.3",
   "torch>=2.1",
   "torchvision>=0.16",
+  "tqdm>=4.66",
 ]
 
 [project.scripts]
