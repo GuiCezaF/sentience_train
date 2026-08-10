@@ -1,0 +1,15 @@
+schema: tuning-config/v2
+training_config: default.yaml
+architectures: [DS-CNN, MobileNetV3-Small, ResNet-18]
+seeds: [42, 43, 44]
+tuning_fraction: 0.20
+trial_grid:
+  - {trial_id: T0, augmentation: {flip: 0.5, rotation: 5.0, translate: 0.04, scale_min: 0.98, scale_max: 1.02, brightness: 0.10, contrast: 0.10}, loss: weighted_ce, class_weight_exponent: 0.5, focal_gamma: null, learning_rate: base, policy: full}
+  - {trial_id: T1, augmentation: {flip: 0.5, rotation: 5.0, translate: 0.04, scale_min: 0.98, scale_max: 1.02, brightness: 0.10, contrast: 0.10}, loss: weighted_ce, class_weight_exponent: 0.5, focal_gamma: null, learning_rate: base, policy: classifier-only}
+  - {trial_id: T2, augmentation: {flip: 0.5, rotation: 5.0, translate: 0.04, scale_min: 0.98, scale_max: 1.02, brightness: 0.10, contrast: 0.10}, loss: weighted_ce, class_weight_exponent: 0.5, focal_gamma: null, learning_rate: low, policy: full}
+  - {trial_id: T3, augmentation: {flip: 0.5, rotation: 5.0, translate: 0.04, scale_min: 0.98, scale_max: 1.02, brightness: 0.10, contrast: 0.10}, loss: weighted_ce, class_weight_exponent: 0.5, focal_gamma: null, learning_rate: low, policy: classifier-only}
+  - {trial_id: T4, augmentation: {flip: 0.5, rotation: 10.0, translate: 0.08, scale_min: 0.95, scale_max: 1.05, brightness: 0.15, contrast: 0.15}, loss: weighted_ce, class_weight_exponent: 0.5, focal_gamma: null, learning_rate: base, policy: full}
+  - {trial_id: T5, augmentation: {flip: 0.5, rotation: 10.0, translate: 0.08, scale_min: 0.95, scale_max: 1.05, brightness: 0.15, contrast: 0.15}, loss: weighted_ce, class_weight_exponent: 0.5, focal_gamma: null, learning_rate: base, policy: full, label_smoothing: 0.05, warmup_epochs: 5, gradient_clip_norm: 1.0}
+  - {trial_id: T6, augmentation: {flip: 0.5, rotation: 5.0, translate: 0.04, scale_min: 0.98, scale_max: 1.02, brightness: 0.10, contrast: 0.10}, loss: focal, class_weight_exponent: 0.5, focal_gamma: 2.0, learning_rate: base, policy: full}
+  - {trial_id: T7, augmentation: {flip: 0.5, rotation: 5.0, translate: 0.04, scale_min: 0.98, scale_max: 1.02, brightness: 0.10, contrast: 0.10}, loss: focal, class_weight_exponent: 0.5, focal_gamma: 2.0, learning_rate: base, policy: classifier-only}
+  - {trial_id: T8, augmentation: {flip: 0.5, rotation: 5.0, translate: 0.04, scale_min: 0.98, scale_max: 1.02, brightness: 0.10, contrast: 0.10}, loss: balanced_softmax, class_weight_exponent: null, focal_gamma: null, learning_rate: base, policy: full}

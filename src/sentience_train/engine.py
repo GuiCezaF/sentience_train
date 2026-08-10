@@ -1,1272 +1,379 @@
-"""Training engine and the reproducible release-candidate orchestrator."""
+"""Training engine seam and deterministic PyTorch adapter."""
 
 from __future__ import annotations
 
-import copy
-import hashlib
 import json
-import logging
-import math
 import os
 import platform
 import random
-import sys
-from collections import Counter
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterable, Mapping, Protocol, Sequence
+from typing import Any, Protocol
 
 import numpy as np
 import torch
 from torch import nn
-from torch.nn import functional as F
-from torch.utils.data import DataLoader
-from tqdm.auto import tqdm
+from torch.utils.data import DataLoader, Dataset
 
-from .artifacts import (
-    RunStaging,
-    append_jsonl,
-    git_state,
-    sha256_file,
-    utc_now,
-    write_public_test_index,
-)
-from .config import AppConfig, LABELS, SEEDS, WIDTHS
-from .data import FER2013Dataset, TrainingData, load_training_data
-from .models import NHWCModel, build_candidate
-from .preflight import (
-    Arena,
-    Inspection,
-    PreflightError,
-    _DefaultToolchain,
-    _macs,
-    _validate_inspection,
-)
-from .metrics import (
-    GateResult,
-    Metrics,
-    ResourceMetrics,
-    evaluate_gates,
-    metrics_from_predictions,
-    write_confusion_reports,
-    write_metrics_json,
-)
-from .selection import (
-    EarlyStopping,
-    FrozenRun,
-    SeedResult,
-    SelectionFailed,
-    WidthAggregate,
-    aggregate,
-    aggregate_metrics,
-    representative_seed,
-    should_run_qat,
-    width_order,
-)
+from .config import ARCHITECTURES, QualityGatesConfig, TrainingConfig
+from .data import TuningData, TrainingData
+from .metrics import GateResult, Metrics, evaluate_predictive_gate, metrics_from_predictions
+from .models import build_model
+from .recipes import RecipeSpec, learning_rate_for, scheduled_learning_rate
 
 
-LOGGER = logging.getLogger(__name__)
+class TrainingError(RuntimeError):
+    pass
 
 
-@dataclass
-class _TrainingResult:
-    model: nn.Module
-    metrics: Metrics
+@dataclass(frozen=True)
+class SeedEvidence:
+    architecture: str
+    recipe_id: str
+    seed: int
     checkpoint: Path
-    history: Path
-    best_epoch: int
-
-
-@dataclass
-class _QuantizedResult:
     metrics: Metrics
-    resources: ResourceMetrics
-    artifact: Path
-    route: str
+    gate: GateResult
+    best_epoch: int
+    environment: dict[str, Any]
+    synthetic: bool = False
+
+    def to_dict(self, root: Path | None = None) -> dict[str, Any]:
+        checkpoint = (
+            str(self.checkpoint.relative_to(root))
+            if root and self.checkpoint.is_relative_to(root)
+            else str(self.checkpoint)
+        )
+        return {
+            "architecture": self.architecture,
+            "recipe_id": self.recipe_id,
+            "seed": self.seed,
+            "checkpoint": checkpoint,
+            "metrics": self.metrics.to_dict(),
+            "gate": self.gate.to_dict(),
+            "best_epoch": self.best_epoch,
+            "environment": self.environment,
+            "synthetic": self.synthetic,
+        }
 
 
-class SelectionQuantizer(Protocol):
-    """Substitutable direct LiteRT/AI Edge quantization surface."""
-
-    def export_quantize(self, model: nn.Module, calibration: torch.Tensor, destination: Path) -> None: ...
-
-    def inspect(self, flatbuffer: Path) -> Inspection: ...
-
-    def infer_litert(self, flatbuffer: Path, sample: torch.Tensor) -> Any: ...
-
-    def probe_tflm(self, flatbuffer: Path, operators: Sequence[Any], working_directory: Path) -> Arena: ...
+class TrainingEngine(Protocol):
+    def run(self, request: "TrainingRequest") -> SeedEvidence: ...
 
 
-class _FakeQuantWrapper(nn.Module):
-    """Apply W8A8 fake quantization to a Conv2d/Linear module."""
-
-    def __init__(self, wrapped: nn.Module) -> None:
-        super().__init__()
-        self.wrapped = wrapped
-
-    @staticmethod
-    def _fake(value: torch.Tensor) -> torch.Tensor:
-        detached = value.detach()
-        minimum = float(detached.min().item())
-        maximum = float(detached.max().item())
-        scale = max((maximum - minimum) / 255.0, 1e-8)
-        zero_point = int(max(-128, min(127, round(-minimum / scale - 128))))
-        return torch.fake_quantize_per_tensor_affine(value, scale, zero_point, -128, 127)
-
-    def forward(self, value: torch.Tensor) -> torch.Tensor:
-        value = self._fake(value)
-        module = self.wrapped
-        if isinstance(module, nn.Conv2d):
-            weight = self._fake(module.weight)
-            bias = None if module.bias is None else self._fake(module.bias)
-            return F.conv2d(
-                value,
-                weight,
-                bias,
-                module.stride,
-                module.padding,
-                module.dilation,
-                module.groups,
-            )
-        if isinstance(module, nn.Linear):
-            weight = self._fake(module.weight)
-            bias = None if module.bias is None else self._fake(module.bias)
-            return F.linear(value, weight, bias)
-        return self._fake(module(value))
-
-
-class _FakeQuantizedModel(nn.Module):
-    """A training-only W8A8 graph; it is never sent to the converter."""
-
-    def __init__(self, model: nn.Module) -> None:
-        super().__init__()
-        self.model = model
-        self._wrap(self.model)
-
-    def _wrap(self, module: nn.Module) -> None:
-        for name, child in list(module.named_children()):
-            if isinstance(child, (nn.Conv2d, nn.Linear)):
-                setattr(module, name, _FakeQuantWrapper(child))
-            else:
-                self._wrap(child)
-
-    def forward(self, value: torch.Tensor) -> torch.Tensor:
-        return _FakeQuantWrapper._fake(self.model(value))
+@dataclass(frozen=True)
+class TrainingRequest:
+    config: TrainingConfig
+    architecture: str
+    trial: RecipeSpec
+    seed: int
+    data: TrainingData | TuningData
+    output: Path
+    full_training: bool = False
+    batch_size: int | None = None
 
 
 def seed_everything(seed: int) -> None:
-    # Required by deterministic CUDA matrix operations. Preserve an explicit
-    # user choice while providing PyTorch's recommended deterministic default.
-    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-    torch.use_deterministic_algorithms(True, warn_only=False)
-    torch.backends.cudnn.benchmark = False
-    torch.backends.cudnn.deterministic = True
 
 
-def _worker_init(worker_id: int) -> None:
-    seed = torch.initial_seed() % (2**32)
-    random.seed(seed)
-    np.random.seed(seed)
+def resolve_worker_count(requested: int | str, logical_cpus: int | None = None) -> int:
+    if requested != "auto":
+        return int(requested)
+    count = logical_cpus or (os.cpu_count() or 1)
+    cap = 4 if platform.system() == "Windows" else 8
+    return min(cap, count // 2)
 
 
-def _device(requested: str) -> torch.device:
-    if requested == "cpu":
-        return torch.device("cpu")
-    if requested == "cuda":
-        if not torch.cuda.is_available():
-            raise RuntimeError("training.device is cuda but CUDA is unavailable")
-        return torch.device("cuda")
-    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+def resolve_batch_size(config: TrainingConfig, architecture: str, probe: Any | None = None) -> int:
+    del architecture
+    if isinstance(config.training.batch_size, int):
+        return config.training.batch_size
+    if probe is None:
+        return 128
+    return int(probe)
 
 
-def _loaders(config: AppConfig, data: TrainingData, seed: int) -> tuple[DataLoader, DataLoader]:
-    generator = torch.Generator()
-    generator.manual_seed(seed)
-    common = {
-        "batch_size": config.training.batch_size,
-        "num_workers": config.training.num_workers,
-        "worker_init_fn": _worker_init,
-        "persistent_workers": config.training.num_workers > 0,
+def _loader(
+    dataset: Dataset[tuple[torch.Tensor, int]],
+    batch: int,
+    workers: int,
+    seed: int,
+    config: TrainingConfig,
+    shuffle: bool,
+) -> DataLoader[tuple[torch.Tensor, torch.Tensor]]:
+    generator = torch.Generator().manual_seed(seed)
+    kwargs: dict[str, Any] = {
+        "batch_size": batch,
+        "shuffle": shuffle,
+        "num_workers": workers,
+        "pin_memory": config.training.device.startswith("cuda"),
+        "generator": generator,
     }
-    return (
-        DataLoader(data.train, shuffle=True, generator=generator, **common),
-        DataLoader(data.validation, shuffle=False, **common),
-    )
+    if workers:
+        kwargs.update({"persistent_workers": True, "prefetch_factor": 2})
+    return DataLoader(dataset, **kwargs)
 
 
-def _class_weights(labels: tuple[int, ...]) -> torch.Tensor:
-    counts = Counter(labels)
-    values = torch.tensor(
-        [1.0 / np.sqrt(counts[index]) for index in range(len(LABELS))],
-        dtype=torch.float32,
-    )
-    return values / values.mean()
+def _loss(trial: RecipeSpec, labels: tuple[int, ...]) -> nn.Module:
+    counts = torch.bincount(torch.tensor(labels, dtype=torch.long), minlength=4).float()
+    if trial.loss == "balanced_softmax":
+
+        class Balanced(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.register_buffer("log_counts", counts.clamp_min(1.0).log())
+
+            def forward(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+                return nn.functional.cross_entropy(logits + self.get_buffer("log_counts"), target)
+
+        return Balanced()
+    exponent = 0.5 if trial.class_weight_exponent is None else trial.class_weight_exponent
+    weights = counts.clamp_min(1.0) ** -float(exponent)
+    weights /= weights.mean()
+    if trial.loss == "weighted_ce":
+        return nn.CrossEntropyLoss(weight=weights, label_smoothing=trial.label_smoothing)
+    if trial.loss == "focal":
+
+        class Focal(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.cross_entropy = nn.CrossEntropyLoss(weight=weights, reduction="none")
+                self.gamma = float(trial.focal_gamma or 2.0)
+
+            def forward(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+                value = self.cross_entropy(logits, target)
+                return ((1.0 - torch.exp(-value)) ** self.gamma * value).mean()
+
+        return Focal()
+    raise TrainingError(f"unknown loss {trial.loss!r}")
 
 
-def _validate(
+def _evaluate(
     model: nn.Module,
-    loader: DataLoader,
-    criterion: nn.Module,
+    loader: DataLoader[Any],
     device: torch.device,
+    loss: nn.Module,
     *,
-    dtype: str = "float32",
+    partition: str,
 ) -> Metrics:
     model.eval()
-    total_loss = 0.0
-    total = 0
     actual: list[int] = []
     predicted: list[int] = []
-    scores: list[np.ndarray] = []
+    probabilities: list[np.ndarray] = []
+    losses: list[float] = []
     with torch.no_grad():
-        for images, labels in loader:
-            images, labels = images.to(device, dtype=torch.float32), labels.to(device)
+        for images, targets in loader:
+            images = images.to(device, non_blocking=True)
+            targets = targets.to(device, non_blocking=True)
             logits = model(images)
-            loss = criterion(logits, labels)
-            total_loss += float(loss.item()) * labels.size(0)
-            total += labels.size(0)
-            actual.extend(labels.cpu().tolist())
-            predicted.extend(logits.argmax(dim=1).cpu().tolist())
-            scores.append(torch.softmax(logits, dim=1).cpu().numpy())
+            losses.append(float(loss(logits.float(), targets).item()))
+            probabilities.extend(torch.softmax(logits.float(), dim=1).cpu().numpy())
+            predicted.extend(logits.argmax(1).cpu().tolist())
+            actual.extend(targets.cpu().tolist())
     return metrics_from_predictions(
         actual,
         predicted,
-        np.concatenate(scores),
-        loss=total_loss / max(total, 1),
-        dtype=dtype,
+        np.asarray(probabilities),
+        loss=float(np.mean(losses or [0.0])),
+        partition=partition,
     )
 
 
-def _build_model(
-    config: AppConfig,
-    width: float,
-    model_factory: Callable[[str, int], nn.Module] | None,
-) -> nn.Module:
-    name = f"ds_cnn_w{int(round(width * 100)):03d}"
-    factory = model_factory or (lambda model_name, num_classes: build_candidate(model_name, num_classes))
-    return factory(name, config.model.num_classes)
+def _checkpoint_better(candidate: Metrics, incumbent: Metrics | None, gates: QualityGatesConfig) -> bool:
+    if incumbent is None:
+        return True
+    return (
+        int(evaluate_predictive_gate(candidate, gates).passed),
+        candidate.predictive_margin(gates),
+        candidate.macro_f1,
+        -candidate.loss,
+    ) > (
+        int(evaluate_predictive_gate(incumbent, gates).passed),
+        incumbent.predictive_margin(gates),
+        incumbent.macro_f1,
+        -incumbent.loss,
+    )
 
 
-def _train_epochs(
-    config: AppConfig,
-    data: TrainingData,
-    model: nn.Module,
-    seed: int,
-    checkpoint: Path,
-    history_path: Path,
-    device: torch.device,
-    *,
-    max_epochs: int,
-    progress_label: str,
-    learning_rate: float | None = None,
-) -> _TrainingResult:
-    weights = _class_weights(data.train_labels).to(device)
-    criterion = nn.CrossEntropyLoss(weight=weights)
-    optimizer_config = config.optimizer
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=optimizer_config.lr if learning_rate is None else learning_rate,
-        weight_decay=optimizer_config.weight_decay,
-    )
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max_epochs)
-    train_loader, validation_loader = _loaders(config, data, seed)
-    stopper = EarlyStopping(config.early_stopping.patience, config.early_stopping.min_delta)
-    checkpoint.parent.mkdir(parents=True, exist_ok=True)
-    history_path.parent.mkdir(parents=True, exist_ok=True)
-    history_path.write_text("", encoding="utf-8")
-    progress = tqdm(
-        total=max_epochs * len(train_loader),
-        desc=progress_label,
-        unit="batch",
-        dynamic_ncols=True,
-    )
-    try:
-        for epoch in range(1, max_epochs + 1):
+def _freeze_for_classifier_warmup(model: nn.Module, architecture: str) -> None:
+    for parameter in model.parameters():
+        parameter.requires_grad = False
+
+    head: nn.Module | None
+    if architecture == "DS-CNN":
+        candidate = getattr(model, "head", None)
+        head = candidate if isinstance(candidate, nn.Module) else None
+    elif architecture == "MobileNetV3-Small":
+        classifier = getattr(model, "classifier", None)
+        if isinstance(classifier, nn.Sequential):
+            parameterized = tuple(module for module in classifier.children() if tuple(module.parameters()))
+            head = parameterized[-1] if parameterized else None
+        else:
+            head = classifier if isinstance(classifier, nn.Module) else None
+    elif architecture == "ResNet-18":
+        candidate = getattr(model, "fc", None)
+        head = candidate if isinstance(candidate, nn.Module) else None
+    else:
+        head = None
+
+    if head is None:
+        raise TrainingError(f"could not locate classifier head for {architecture}")
+    head_parameters = tuple(head.parameters())
+    if not head_parameters:
+        raise TrainingError(f"classifier head for {architecture} has no parameters")
+    for parameter in head_parameters:
+        parameter.requires_grad = True
+
+
+class TorchTrainingEngine:
+    def __init__(self, *, model_factory: Any | None = None) -> None:
+        self.model_factory = model_factory or build_model
+
+    def run(self, request: TrainingRequest) -> SeedEvidence:
+        if request.architecture not in ARCHITECTURES:
+            raise TrainingError(f"unsupported architecture {request.architecture}")
+        seed_everything(request.seed)
+        config = request.config
+        if torch.cuda.is_available():
+            torch.backends.cuda.matmul.allow_tf32 = config.training.tf32
+            torch.backends.cudnn.allow_tf32 = config.training.tf32
+            torch.backends.cudnn.benchmark = config.training.cudnn_benchmark
+        device = torch.device(
+            config.training.device if config.training.device == "cpu" or torch.cuda.is_available() else "cpu"
+        )
+        if config.training.device.startswith("cuda") and device.type != "cuda":
+            raise TrainingError("CUDA requested but unavailable")
+        if isinstance(request.data, TuningData):
+            train_dataset, validation = request.data.optimization, request.data.tuning
+            labels = request.data.optimization_labels
+            validation_partition = "Tuning"
+        else:
+            train_dataset, validation = request.data.train, request.data.validation
+            labels = request.data.train_labels
+            validation_partition = "PublicTest"
+        train_dataset = train_dataset.with_augmentation(request.trial.augmentation)
+        workers = resolve_worker_count(config.training.workers)
+        batch = request.batch_size or resolve_batch_size(config, request.architecture)
+        train_loader = _loader(train_dataset, batch, workers, request.seed, config, True)
+        validation_loader = _loader(validation, batch, workers, request.seed, config, False)
+        model = self.model_factory(request.architecture, weights_dir=config.model.weights_dir, num_classes=4)
+        model = model.to(device)
+        if config.training.channels_last:
+            model = getattr(model, "to")(memory_format=torch.channels_last)
+        criterion = _loss(request.trial, labels).to(device)
+        base_lr = self._lr(request.architecture, request.trial)
+        if request.trial.policy == "classifier-only":
+            _freeze_for_classifier_warmup(model, request.architecture)
+        optimizer = torch.optim.AdamW(
+            (parameter for parameter in model.parameters() if parameter.requires_grad),
+            lr=base_lr,
+            weight_decay=config.training.weight_decay,
+        )
+        epochs = config.training.full_epochs if request.full_training else config.training.triage_epochs
+        patience = config.training.full_patience if request.full_training else config.training.triage_patience
+        scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda" and config.training.amp)
+        best: Metrics | None = None
+        best_epoch = 0
+        stale = 0
+        request.output.mkdir(parents=True, exist_ok=True)
+        checkpoint = request.output / "checkpoint.pt"
+        history = request.output / "history.jsonl"
+        for epoch in range(1, epochs + 1):
+            if request.trial.policy == "classifier-only" and epoch == 4:
+                for parameter in model.parameters():
+                    parameter.requires_grad = True
+                optimizer = torch.optim.AdamW(model.parameters(), lr=base_lr, weight_decay=config.training.weight_decay)
+            if request.trial.policy != "classifier-only" or epoch > 3:
+                schedule_epoch = epoch - 3 if request.trial.policy == "classifier-only" else epoch
+                schedule_epochs = epochs - 3 if request.trial.policy == "classifier-only" else epochs
+                warmup_epochs = min(request.trial.warmup_epochs, max(schedule_epochs - 1, 0))
+                current_lr = scheduled_learning_rate(
+                    base_lr,
+                    schedule_epoch,
+                    schedule_epochs,
+                    warmup_epochs,
+                )
+                for group in optimizer.param_groups:
+                    group["lr"] = current_lr
             model.train()
-            train_loss_sum = 0.0
-            train_examples = 0
-            for images, labels in train_loader:
-                images, labels = images.to(device, dtype=torch.float32), labels.to(device)
+            for images, targets in train_loader:
+                images = images.to(device, non_blocking=True)
+                targets = targets.to(device, non_blocking=True)
                 optimizer.zero_grad(set_to_none=True)
-                logits = model(images)
-                loss = criterion(logits, labels)
-                loss.backward()
-                optimizer.step()
-                train_loss_sum += float(loss.item()) * labels.size(0)
-                train_examples += labels.size(0)
-                progress.update(1)
-            validation = _validate(model, validation_loader, criterion, device)
-            scheduler.step()
-            train_loss = train_loss_sum / max(train_examples, 1)
-            row = {
-                "epoch": epoch,
-                "train_loss": train_loss,
-                "validation_loss": validation.loss,
-                "macro_f1": validation.macro_f1,
-                "accuracy": validation.accuracy,
-                "learning_rate": optimizer.param_groups[0]["lr"],
-            }
-            append_jsonl(history_path, row)
-            progress.set_postfix(
-                epoch=f"{epoch}/{max_epochs}",
-                loss=f"{train_loss:.4f}",
-                val_loss=f"{validation.loss:.4f}",
-                macro_f1=f"{validation.macro_f1:.4f}",
-            )
-            if stopper.update(epoch, validation.macro_f1, validation.loss):
+                with torch.autocast(
+                    device_type=device.type, dtype=torch.float16, enabled=device.type == "cuda" and config.training.amp
+                ):
+                    output = model(images)
+                    value = criterion(output, targets)
+                scaler.scale(value).backward()
+                if request.trial.gradient_clip_norm is not None:
+                    scaler.unscale_(optimizer)
+                    nn.utils.clip_grad_norm_(model.parameters(), request.trial.gradient_clip_norm)
+                scaler.step(optimizer)
+                scaler.update()
+            current = _evaluate(model, validation_loader, device, criterion, partition=validation_partition)
+            with history.open("a", encoding="utf-8") as handle:
+                handle.write(
+                    json.dumps(
+                        {
+                            "epoch": epoch,
+                            "learning_rate": optimizer.param_groups[0]["lr"],
+                            "metrics": current.to_dict(),
+                        },
+                        sort_keys=True,
+                    )
+                    + "\n"
+                )
+            if _checkpoint_better(current, best, config.gates):
+                best, best_epoch, stale = current, epoch, 0
                 torch.save(
                     {
-                        "epoch": epoch,
-                        "model_state_dict": model.state_dict(),
-                        "optimizer_state_dict": optimizer.state_dict(),
-                        "macro_f1": validation.macro_f1,
-                        "validation_loss": validation.loss,
-                        "seed": seed,
+                        "state_dict": model.state_dict(),
+                        "architecture": request.architecture,
+                        "recipe_id": request.trial.trial_id,
+                        "seed": request.seed,
                     },
                     checkpoint,
                 )
-            if stopper.should_stop:
-                break
-    finally:
-        progress.close()
-    selected = torch.load(checkpoint, map_location=device, weights_only=False)
-    model.load_state_dict(selected["model_state_dict"])
-    # Save the restored state, making the checkpoint self-describing.
-    selected["restored_best"] = True
-    torch.save(selected, checkpoint)
-    final_metrics = _validate(model, validation_loader, criterion, device)
-    return _TrainingResult(model, final_metrics, checkpoint, history_path, int(selected["epoch"]))
-
-
-def _write_metrics(path: Path, metrics: Metrics) -> None:
-    write_metrics_json(path, metrics)
-
-
-def _write_confusion(directory: Path, prefix: str, metrics: Metrics) -> tuple[Path, Path]:
-    json_path, csv_path, _png_path = write_confusion_reports(directory, {"model": metrics}, stem=prefix)
-    return json_path, csv_path
-
-
-def _calibration(data: TrainingData, seed: int, examples: int) -> tuple[torch.Tensor, dict[str, Any]]:
-    if examples % len(LABELS) != 0:
-        raise PreflightError("calibration", "calibration_examples must be divisible by class count")
-    per_label = examples // len(LABELS)
-    rng = random.Random(seed)
-    selected = []
-    for label, name in enumerate(LABELS):
-        candidates = [record for record in data.train.records if record.label == label]
-        if len(candidates) < per_label:
-            raise PreflightError(
-                "calibration",
-                f"Training has too few {name} samples",
-                observed=len(candidates),
-                limit=per_label,
-            )
-        selected.extend(rng.sample(candidates, per_label))
-    dataset = FER2013Dataset(data.provenance.path, tuple(selected), augmentation=None)
-    values = torch.stack([dataset[index][0] for index in range(len(dataset))])
-    identifiers = [str(record.line_number) for record in selected]
-    return values.permute(0, 2, 3, 1).contiguous(), {
-        "seed": seed,
-        "per_label": per_label,
-        "total": len(selected),
-        "counts": {name: per_label for name in LABELS},
-        "identifier_sha256": hashlib.sha256("\n".join(identifiers).encode("utf-8")).hexdigest(),
-        "source_partition": "Training",
-    }
-
-
-def _as_contract(value: Any) -> dict[str, Any]:
-    if hasattr(value, "__dataclass_fields__"):
-        return {key: getattr(value, key) for key in value.__dataclass_fields__}
-    return dict(value)
-
-
-def _resource_from_mapping(value: Mapping[str, Any]) -> ResourceMetrics:
-    return ResourceMetrics(
-        tflite_bytes=int(value["tflite_bytes"]),
-        arena_with_margin_bytes=int(value["arena_with_margin_bytes"]),
-        arena_total_bytes=None if value.get("arena_total_bytes") is None else int(value["arena_total_bytes"]),
-        arena_head_bytes=None if value.get("arena_head_bytes") is None else int(value["arena_head_bytes"]),
-        arena_temporary_bytes=None
-        if value.get("arena_temporary_bytes") is None
-        else int(value["arena_temporary_bytes"]),
-        arena_tail_bytes=None if value.get("arena_tail_bytes") is None else int(value["arena_tail_bytes"]),
-        macs=int(value["macs"]),
-        input_contract=value.get("input_contract", {}),
-        output_contract=value.get("output_contract", {}),
-        operators=tuple(value.get("operators", ())),
-        sha256=value.get("sha256"),
-    )
-
-
-def _metrics_from_value(value: Any, *, dtype: str = "int8") -> Metrics:
-    if isinstance(value, Metrics):
-        return value
-    if isinstance(value, Mapping) and isinstance(value.get("metrics"), Metrics):
-        return value["metrics"]
-    if isinstance(value, Mapping) and {"y_true", "y_pred"}.issubset(value):
-        return metrics_from_predictions(
-            value["y_true"],
-            value["y_pred"],
-            value.get("y_score"),
-            loss=value.get("loss"),
-            dtype=dtype,
-        )
-    raise PreflightError("evaluation", "quantization toolchain did not return PublicTest metrics")
-
-
-def _quantize(
-    config: AppConfig,
-    data: TrainingData,
-    model: nn.Module,
-    calibration: torch.Tensor,
-    destination: Path,
-    seed: int,
-    width: float,
-    route: str,
-    toolchain: SelectionQuantizer,
-    quantization_runner: Callable[..., Any] | None,
-) -> _QuantizedResult:
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    runner_value: Any = None
-    if quantization_runner is not None:
-        try:
-            runner_value = quantization_runner(model, calibration, destination, route, width, seed)
-        except PreflightError:
-            raise
-        except Exception as exc:
-            raise PreflightError("conversion", str(exc)) from exc
-    else:
-        try:
-            toolchain.export_quantize(NHWCModel(model).eval(), calibration, destination)
-        except PreflightError:
-            raise
-        except Exception as exc:
-            raise PreflightError("conversion", str(exc)) from exc
-    if not destination.is_file():
-        raise PreflightError("conversion", f"quantizer did not create {destination}")
-
-    embedded_metrics: Metrics | None = None
-    embedded_resources: ResourceMetrics | None = None
-    if isinstance(runner_value, Mapping):
-        if runner_value.get("metrics") is not None:
-            embedded_metrics = _metrics_from_value(runner_value, dtype="int8")
-        if runner_value.get("resources") is not None:
-            resource_value = runner_value["resources"]
-            embedded_resources = (
-                resource_value
-                if isinstance(resource_value, ResourceMetrics)
-                else _resource_from_mapping(resource_value)
-            )
-    try:
-        inspection = toolchain.inspect(destination)
-        _validate_inspection(inspection)
-        inference = toolchain.infer_litert(destination, calibration[:1])
-        if getattr(inference, "shape", None) != (1, len(LABELS)) or getattr(inference, "dtype", None) != "int8":
-            raise PreflightError(
-                "litert_inference",
-                "LiteRT inference contract failed",
-                observed=_as_contract(inference),
-            )
-        arena = toolchain.probe_tflm(destination, inspection.operators, destination.parent / ".probe")
-        arena_total = int(arena.total_bytes)
-        resources = ResourceMetrics(
-            tflite_bytes=destination.stat().st_size,
-            arena_with_margin_bytes=math.ceil(arena_total * 1.20),
-            arena_total_bytes=arena_total,
-            arena_head_bytes=arena.head_bytes,
-            arena_temporary_bytes=arena.temporary_bytes,
-            arena_tail_bytes=arena.tail_bytes,
-            macs=_macs(model),
-            input_contract=_as_contract(inspection.input),
-            output_contract=_as_contract(inspection.output),
-            operators=tuple(_as_contract(operator) for operator in inspection.operators),
-            sha256=sha256_file(destination),
-        )
-    except PreflightError:
-        if embedded_resources is None:
-            raise
-        resources = embedded_resources
-    except (AttributeError, KeyError, TypeError, ValueError) as exc:
-        if embedded_resources is None:
-            raise PreflightError("inspection", str(exc)) from exc
-        resources = embedded_resources
-
-    if embedded_resources is not None:
-        # The substitute runner may provide a complete inspection result.  The
-        # file hash is still taken here so the manifest remains authoritative.
-        resources = replace(
-            embedded_resources,
-            tflite_bytes=destination.stat().st_size,
-            sha256=sha256_file(destination),
-        )
-
-    metric_value = embedded_metrics
-    if metric_value is None:
-        evaluator = getattr(toolchain, "evaluate_litert", None) or getattr(toolchain, "evaluate", None)
-        predictor = getattr(toolchain, "predict_litert", None) or getattr(toolchain, "predict", None)
-        validation_loader = DataLoader(
-            data.validation,
-            batch_size=config.training.batch_size,
-            shuffle=False,
-            num_workers=config.training.num_workers,
-        )
-        if evaluator is not None:
-            value = evaluator(destination, validation_loader)
-            metric_value = _metrics_from_value(value)
-        elif predictor is not None:
-            value = predictor(destination, validation_loader)
-            metric_value = _metrics_from_value(value)
-        else:
-            raise PreflightError("evaluation", "quantization toolchain has no PublicTest evaluator")
-    return _QuantizedResult(metric_value, resources, destination, route)
-
-
-def _unwrap_qat_state(state: Mapping[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-    result: dict[str, torch.Tensor] = {}
-    for key, value in state.items():
-        if key.startswith("model."):
-            key = key[len("model.") :]
-        key = key.replace(".wrapped.", ".")
-        result[key] = value
-    return result
-
-
-def _qat_train(
-    config: AppConfig,
-    data: TrainingData,
-    fp32: _TrainingResult,
-    seed: int,
-    checkpoint: Path,
-    history: Path,
-    device: torch.device,
-    width: float,
-) -> _TrainingResult:
-    base = copy.deepcopy(fp32.model).to(device)
-    qat = _FakeQuantizedModel(base).to(device)
-    result = _train_epochs(
-        config,
-        data,
-        qat,
-        seed,
-        checkpoint,
-        history,
-        device,
-        max_epochs=config.quantization.qat.epochs,
-        progress_label=f"QAT w={width:.2f} seed={seed}",
-        learning_rate=config.quantization.qat.lr,
-    )
-    normal = copy.deepcopy(fp32.model).to(device)
-    normal.load_state_dict(_unwrap_qat_state(qat.state_dict()))
-    normal_result = _TrainingResult(normal, result.metrics, result.checkpoint, result.history, result.best_epoch)
-    return normal_result
-
-
-def _seed_result(
-    config: AppConfig,
-    data: TrainingData,
-    width: float,
-    seed: int,
-    candidate_directory: Path,
-    device: torch.device,
-    model_factory: Callable[[str, int], nn.Module] | None,
-    toolchain: SelectionQuantizer,
-    quantization_runner: Callable[..., Any] | None,
-) -> SeedResult:
-    seed_directory = candidate_directory / f"seed-{seed}"
-    fp32_metrics_path = seed_directory / "metrics" / "fp32.json"
-    fp32_checkpoint = seed_directory / "checkpoints" / "fp32.pt"
-    history = seed_directory / "metrics" / "history.jsonl"
-    seed_everything(seed)
-    model = _build_model(config, width, model_factory).to(device)
-    fp32 = _train_epochs(
-        config,
-        data,
-        model,
-        seed,
-        fp32_checkpoint,
-        history,
-        device,
-        max_epochs=config.training.epochs,
-        progress_label=f"FP32 w={width:.2f} seed={seed}",
-    )
-    _write_metrics(fp32_metrics_path, fp32.metrics)
-    fp32_gate = evaluate_gates(fp32.metrics, config.quality_gates)
-    fp32_cm_json, fp32_cm_csv = _write_confusion(seed_directory / "metrics", "fp32-confusion", fp32.metrics)
-    common = {
-        "width": width,
-        "seed": seed,
-        "fp32_metrics": fp32.metrics,
-        "fp32_gate": fp32_gate,
-        "checkpoint_fp32": str(fp32_checkpoint.relative_to(candidate_directory.parent.parent)),
-        "history": str(history.relative_to(candidate_directory.parent.parent)),
-        "confusion_matrix_json": str(fp32_cm_json.relative_to(candidate_directory.parent.parent)),
-        "confusion_matrix_csv": str(fp32_cm_csv.relative_to(candidate_directory.parent.parent)),
-        "best_epoch": fp32.best_epoch,
-    }
-    if not fp32_gate.passed:
-        return SeedResult(
-            **common,
-            status="failed",
-            transition_reasons=("fp32_predictive_gates_failed", *fp32_gate.reasons),
-        )
-
-    calibration, calibration_report = _calibration(
-        data,
-        config.quantization.calibration_seed,
-        config.quantization.calibration_examples,
-    )
-    (seed_directory / "metrics" / "calibration.json").write_text(
-        json.dumps(calibration_report, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    selection_artifact = seed_directory / "selection.tflite"
-    ptq_error: PreflightError | None = None
-    ptq: _QuantizedResult | None = None
-    try:
-        ptq = _quantize(
-            config,
-            data,
-            fp32.model,
-            calibration,
-            selection_artifact,
-            seed,
-            width,
-            "ptq",
-            toolchain,
-            quantization_runner,
-        )
-    except PreflightError as exc:
-        ptq_error = exc
-
-    if ptq is not None:
-        delta = fp32.metrics.accuracy - ptq.metrics.accuracy
-        int8_gate = evaluate_gates(
-            ptq.metrics,
-            config.quality_gates,
-            reference=fp32.metrics,
-            resources=ptq.resources,
-        )
-        _write_metrics(seed_directory / "metrics" / "int8.json", ptq.metrics)
-        int8_cm_json, int8_cm_csv = _write_confusion(seed_directory / "metrics", "int8-confusion", ptq.metrics)
-        if not should_run_qat(
-            ptq_conversion_failed=False,
-            accuracy_delta=delta,
-            max_accuracy_delta=config.quality_gates.max_accuracy_delta,
-        ):
-            status = "passed" if int8_gate.passed else "failed"
-            reasons = () if int8_gate.passed else ("ptq_gates_failed_without_qat_trigger", *int8_gate.reasons)
-            return SeedResult(
-                **{
-                    **common,
-                    "confusion_matrix_json": str(int8_cm_json.relative_to(candidate_directory.parent.parent)),
-                    "confusion_matrix_csv": str(int8_cm_csv.relative_to(candidate_directory.parent.parent)),
-                },
-                int8_metrics=ptq.metrics,
-                int8_gate=int8_gate,
-                resources=ptq.resources,
-                accuracy_delta=delta,
-                route="ptq",
-                status=status,
-                transition_reasons=reasons,
-                tflite=str(selection_artifact.relative_to(candidate_directory.parent.parent)),
-            )
-    qat_trigger = should_run_qat(
-        ptq_conversion_failed=ptq_error is not None and ptq_error.stage == "conversion",
-        accuracy_delta=None if ptq is None else fp32.metrics.accuracy - ptq.metrics.accuracy,
-        max_accuracy_delta=config.quality_gates.max_accuracy_delta,
-    )
-    if not qat_trigger:
-        reasons = ("ptq_failed_without_qat_trigger",) if ptq_error else ("ptq_gates_failed_without_qat_trigger",)
-        if ptq_error:
-            reasons += (f"ptq:{ptq_error.stage}", str(ptq_error))
-        else:
-            reasons += tuple(int8_gate.reasons if ptq else ())
-        return SeedResult(**common, status="failed", transition_reasons=reasons)
-    if not config.quantization.qat.enabled:
-        return SeedResult(
-            **common,
-            status="failed",
-            transition_reasons=("qat_triggered_but_disabled",),
-        )
-
-    qat_checkpoint = seed_directory / "checkpoints" / "qat.pt"
-    qat_history = seed_directory / "metrics" / "qat-history.jsonl"
-    try:
-        qat = _qat_train(config, data, fp32, seed, qat_checkpoint, qat_history, device, width)
-        qat_result = _quantize(
-            config,
-            data,
-            qat.model,
-            calibration,
-            selection_artifact,
-            seed,
-            width,
-            "qat",
-            toolchain,
-            quantization_runner,
-        )
-    except PreflightError as exc:
-        return SeedResult(
-            **common,
-            status="failed",
-            transition_reasons=("qat_failed", f"{exc.stage}:{exc}"),
-        )
-    except Exception as exc:
-        return SeedResult(
-            **common,
-            status="failed",
-            transition_reasons=("qat_failed", f"unexpected:{type(exc).__name__}:{exc}"),
-        )
-    delta = fp32.metrics.accuracy - qat_result.metrics.accuracy
-    int8_gate = evaluate_gates(
-        qat_result.metrics,
-        config.quality_gates,
-        reference=fp32.metrics,
-        resources=qat_result.resources,
-    )
-    _write_metrics(seed_directory / "metrics" / "int8.json", qat_result.metrics)
-    int8_cm_json, int8_cm_csv = _write_confusion(seed_directory / "metrics", "int8-confusion", qat_result.metrics)
-    reasons = () if int8_gate.passed else ("qat_gates_failed", *int8_gate.reasons)
-    return SeedResult(
-        **{
-            **common,
-            "confusion_matrix_json": str(int8_cm_json.relative_to(candidate_directory.parent.parent)),
-            "confusion_matrix_csv": str(int8_cm_csv.relative_to(candidate_directory.parent.parent)),
-            "best_epoch": qat.best_epoch,
-            "qat_history": str(qat_history.relative_to(candidate_directory.parent.parent)),
-        },
-        int8_metrics=qat_result.metrics,
-        int8_gate=int8_gate,
-        resources=qat_result.resources,
-        accuracy_delta=delta,
-        route="qat",
-        status="passed" if int8_gate.passed else "failed",
-        transition_reasons=reasons,
-        checkpoint_qat=str(qat_checkpoint.relative_to(candidate_directory.parent.parent)),
-        tflite=str(selection_artifact.relative_to(candidate_directory.parent.parent)),
-    )
-
-
-def _mean_metrics(results: Sequence[SeedResult], dtype: str = "int8") -> Metrics:
-    usable = [result for result in results if result.int8_metrics is not None]
-    if not usable:
-        raise ValueError("no INT8 metrics available")
-
-    def avg(values: Iterable[float]) -> float:
-        return float(np.mean(list(values)))
-
-    return Metrics(
-        accuracy=avg(result.int8_metrics.accuracy for result in usable),
-        macro_f1=avg(result.int8_metrics.macro_f1 for result in usable),
-        loss=avg(result.int8_metrics.loss for result in usable),
-        recall_by_class=tuple(
-            avg(result.int8_metrics.recall_by_class[index] for result in usable) for index in range(len(LABELS))
-        ),
-        precision_by_class=tuple(
-            avg(result.int8_metrics.precision_by_class[index] for result in usable) for index in range(len(LABELS))
-        ),
-        f1_by_class=tuple(
-            avg(result.int8_metrics.f1_by_class[index] for result in usable) for index in range(len(LABELS))
-        ),
-        support_by_class=tuple(
-            int(round(avg(result.int8_metrics.support_by_class[index] for result in usable)))
-            for index in range(len(LABELS))
-        ),
-        confusion_matrix=usable[0].int8_metrics.confusion_matrix,
-        dtype=dtype,
-    )
-
-
-def _aggregate_width(width: float, results: Sequence[SeedResult], config: AppConfig) -> WidthAggregate:
-    if (
-        len(results) != len(SEEDS)
-        or any(result.int8_metrics is None for result in results)
-        or any(result.resources is None for result in results)
-    ):
-        reasons = ["not_all_three_seeds_have_int8_metrics"]
-        if any(result.resources is None for result in results):
-            reasons.append("not_all_three_seeds_have_resource_contracts")
-        reasons.extend(reason for result in results for reason in result.transition_reasons)
-        failed = GateResult(
-            False,
-            {"seed_count": len(results)},
-            {"seed_count": len(SEEDS)},
-            tuple(reasons),
-        )
-        return WidthAggregate(width, tuple(results), {}, None, None, failed, "failed", "; ".join(reasons))
-    aggregates = aggregate_metrics(results)
-    mean_int8 = _mean_metrics(results)
-    fp32_mean = Metrics(
-        accuracy=aggregate(result.fp32_metrics.accuracy for result in results).mean,
-        macro_f1=aggregate(result.fp32_metrics.macro_f1 for result in results).mean,
-        loss=aggregate(result.fp32_metrics.loss for result in results).mean,
-        recall_by_class=tuple(
-            aggregate(result.fp32_metrics.recall_by_class[index] for result in results).mean
-            for index in range(len(LABELS))
-        ),
-        precision_by_class=tuple(
-            aggregate(result.fp32_metrics.precision_by_class[index] for result in results).mean
-            for index in range(len(LABELS))
-        ),
-        f1_by_class=tuple(
-            aggregate(result.fp32_metrics.f1_by_class[index] for result in results).mean for index in range(len(LABELS))
-        ),
-        support_by_class=results[0].fp32_metrics.support_by_class,
-        confusion_matrix=results[0].fp32_metrics.confusion_matrix,
-    )
-    mean_gate = evaluate_gates(mean_int8, config.quality_gates, reference=fp32_mean)
-    representative = next(result for result in results if result.seed == representative_seed(results))
-    reasons = list(mean_gate.reasons)
-    if not representative.fp32_gate.passed:
-        reasons.extend(("representative_fp32_gate_failed", *representative.fp32_gate.reasons))
-    if representative.int8_gate is None or not representative.int8_gate.passed:
-        reasons.extend(
-            (
-                "representative_int8_gate_failed",
-                *(representative.int8_gate.reasons if representative.int8_gate else ()),
-            )
-        )
-    passed = (
-        mean_gate.passed
-        and representative.fp32_gate.passed
-        and representative.int8_gate is not None
-        and representative.int8_gate.passed
-    )
-    return WidthAggregate(
-        width,
-        tuple(results),
-        aggregates,
-        representative.seed,
-        representative,
-        mean_gate,
-        "passed" if passed else "failed",
-        "passed" if passed else "; ".join(reasons),
-    )
-
-
-def _comparison_payload(
-    widths: Sequence[WidthAggregate],
-    *,
-    status: str,
-    selected: WidthAggregate | None,
-    config: AppConfig,
-) -> dict[str, Any]:
-    return {
-        "schema_version": 2,
-        "status": status,
-        "canonical_order": list(WIDTHS),
-        "selection_policy": {
-            "stop_at_first_pass": True,
-            "representative": config.selection.representative,
-        },
-        "quality_gates": {
-            "accuracy": config.quality_gates.accuracy,
-            "macro_f1": config.quality_gates.macro_f1,
-            "recall": config.quality_gates.recall,
-            "max_accuracy_delta": config.quality_gates.max_accuracy_delta,
-            "tflite_bytes": config.quality_gates.tflite_bytes,
-            "arena_with_margin_bytes": config.quality_gates.arena_with_margin_bytes,
-            "macs": config.quality_gates.macs,
-        },
-        "selected": None
-        if selected is None
-        else {
-            "width": selected.width,
-            "seed": selected.representative_seed,
-            "route": selected.representative.route if selected.representative else None,
-        },
-        "widths": [width.to_dict() for width in widths],
-    }
-
-
-def _write_comparison(staging: Path, payload: Mapping[str, Any]) -> None:
-    (staging / "candidate-comparison.json").write_text(
-        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
-    lines = [
-        "# Candidate comparison",
-        "",
-        f"Status: **{payload['status']}**",
-        "",
-        "| Width | Status | Representative | Mean INT8 accuracy | Mean INT8 macro-F1 | Reason |",
-        "|---:|---|---:|---:|---:|---|",
-    ]
-    for item in payload["widths"]:
-        aggregates = item.get("aggregates", {})
-        accuracy = aggregates.get("accuracy", {}).get("mean", "—")
-        macro = aggregates.get("macro_f1", {}).get("mean", "—")
-        lines.append(
-            f"| {item['width']:.2f} | {item['status']} | {item.get('representative_seed') or '—'} | {accuracy} | {macro} | {item['reason']} |"
-        )
-    lines.extend(
-        [
-            "",
-            "## Gates",
-            "",
-            "```json",
-            json.dumps(payload["quality_gates"], indent=2, sort_keys=True),
-            "```",
-            "",
-        ]
-    )
-    (staging / "candidate-comparison.md").write_text("\n".join(lines), encoding="utf-8")
-
-
-def _artifact_hashes(directory: Path) -> dict[str, str]:
-    return {
-        str(path.relative_to(directory)): sha256_file(path)
-        for path in sorted(directory.rglob("*"))
-        if path.is_file() and path.name != "manifest.json"
-    }
-
-
-def _selection_manifest(
-    config: AppConfig,
-    data: TrainingData,
-    staging: RunStaging,
-    status: str,
-    device: torch.device,
-    widths: Sequence[WidthAggregate],
-    selected: WidthAggregate | None,
-    toolchain: Any | None = None,
-) -> dict[str, Any]:
-    lock = config.source_path.parent.parent / "uv.lock"
-    selected_rep = selected.representative if selected else None
-    toolchain_versions: dict[str, Any] = {}
-    if toolchain is not None and callable(getattr(toolchain, "versions", None)):
-        try:
-            toolchain_versions = dict(toolchain.versions())
-        except Exception:
-            toolchain_versions = {"status": "unavailable"}
-    document: dict[str, Any] = {
-        "schema": "frozen-run/v1",
-        "schema_version": "frozen-run/v1",
-        "status": status,
-        "private_test_access": False,
-        "run_id": staging.run_id,
-        "created_at": utc_now(),
-        "configuration": config.resolved_dict(),
-        "selection": {
-            "width_order": list(WIDTHS),
-            "seed_order": list(SEEDS),
-            "stop_at_first_pass": True,
-            "representative_policy": config.selection.representative,
-        },
-        "labels": list(LABELS),
-        "label_mapping": {"0": "angry", "3": "happy", "6": "neutral", "4": "sad"},
-        "csv": {
-            "path": str(data.provenance.path),
-            "sha256": data.provenance.sha256,
-            "dataset_sha256": data.provenance.sha256,
-            "schema": list(data.provenance.header),
-            "release_evidence": data.provenance.release_evidence,
-            "total_rows": data.provenance.total_rows,
-            "partition_counts": data.provenance.partition_counts,
-            "raw_class_counts": data.provenance.raw_class_counts,
-            "selected_class_counts": data.provenance.selected_class_counts,
-            "records_used": ["Training", "PublicTest"],
-            "private_test_access": False,
-        },
-        "public_test_index": "data/public_test.index.json",
-        "git": git_state(config.source_path.parent.parent),
-        "uv_lock_sha256": sha256_file(lock) if lock.is_file() else None,
-        "versions": {
-            "python": sys.version,
-            "torch": torch.__version__,
-            "numpy": np.__version__,
-            "platform": platform.platform(),
-            "training_toolchain": toolchain_versions,
-        },
-        "toolchain": toolchain_versions,
-        "device": str(device),
-        "candidate_comparison": "candidate-comparison.json",
-        "candidates": [width.to_dict() for width in widths],
-        "artifacts": _artifact_hashes(staging.staging),
-    }
-    if selected_rep is not None:
-        checkpoint = selected_rep.checkpoint_qat or selected_rep.checkpoint_fp32
-        calibration: dict[str, Any] | None = None
-        if selected_rep.tflite is not None:
-            calibration_path = staging.staging / Path(selected_rep.tflite).parent / "metrics" / "calibration.json"
-            if calibration_path.is_file():
-                calibration = json.loads(calibration_path.read_text(encoding="utf-8"))
-        document["selected"] = {
-            "architecture": "DS-CNN",
-            "model_name": f"ds_cnn_w{int(round(selected.width * 100)):03d}",
-            "width": selected.width,
-            "seed": selected_rep.seed,
-            "checkpoint": checkpoint,
-            "checkpoint_fp32": selected_rep.checkpoint_fp32,
-            "checkpoint_qat": selected_rep.checkpoint_qat,
-            "tflite": selected_rep.tflite,
-            "int8_artifact": selected_rep.tflite,
-            "labels": list(LABELS),
-            "route": selected_rep.route,
-            "best_epoch": selected_rep.best_epoch,
-            "configuration": config.resolved_dict(),
-            "metrics": {
-                "fp32": selected_rep.fp32_metrics.to_dict(),
-                "int8": selected_rep.int8_metrics.to_dict() if selected_rep.int8_metrics else None,
-            },
-            "metrics_fp32": selected_rep.fp32_metrics.to_dict(),
-            "metrics_int8": selected_rep.int8_metrics.to_dict() if selected_rep.int8_metrics else None,
-            "resources": selected_rep.resources.to_dict() if selected_rep.resources else None,
-            "calibration": calibration,
-            "versions": {
-                "training": document["versions"],
-                "export": {"uv_lock_sha256": document["uv_lock_sha256"]},
-            },
-        }
-    return document
-
-
-def _run_selection(
-    config: AppConfig,
-    *,
-    model_factory: Callable[[str, int], nn.Module] | None = None,
-    toolchain: SelectionQuantizer | None = None,
-    quantization_runner: Callable[..., Any] | None = None,
-    preflight_runner: Callable[[AppConfig, TrainingData, Path], dict] | None = None,
-) -> FrozenRun:
-    device = _device(config.training.device)
-    LOGGER.info("Training device: %s (requested: %s)", device, config.training.device)
-    data = load_training_data(config.data, config.augmentation)
-    staging = RunStaging.create(config.run.directory)
-    staging.write_resolved_config(config.resolved_dict())
-    write_public_test_index(
-        staging.staging,
-        dataset_path=data.provenance.path,
-        dataset_sha256=data.provenance.sha256,
-        records=data.validation.records,
-    )
-    log_path = staging.staging / "logs" / "selection.jsonl"
-    append_jsonl(
-        log_path,
-        {
-            "event": "selection_started",
-            "run_id": staging.run_id,
-            "device": str(device),
-            "requested_device": config.training.device,
-            "private_test_access": False,
-        },
-    )
-    quantizer = toolchain or _DefaultToolchain()
-    widths: list[WidthAggregate] = []
-    selected: WidthAggregate | None = None
-    try:
-        if preflight_runner is not None:
-            preflight = preflight_runner(config, data, staging.staging / "preflight")
-            append_jsonl(
-                log_path,
-                {
-                    "event": "preflight_passed",
-                    "report": "preflight/report.json",
-                    "candidates": len(preflight.get("candidates", [])),
-                },
-            )
-        for width in width_order(config.selection.widths):
-            candidate_directory = staging.staging / "candidates" / f"ds_cnn_w{int(round(width * 100)):03d}"
-            result_42 = _seed_result(
-                config,
-                data,
-                width,
-                42,
-                candidate_directory,
-                device,
-                model_factory,
-                quantizer,
-                quantization_runner,
-            )
-            results = [result_42]
-            if result_42.fp32_gate.passed:
-                for seed in (43, 44):
-                    results.append(
-                        _seed_result(
-                            config,
-                            data,
-                            width,
-                            seed,
-                            candidate_directory,
-                            device,
-                            model_factory,
-                            quantizer,
-                            quantization_runner,
-                        )
-                    )
-            aggregate_result = _aggregate_width(width, results, config)
-            widths.append(aggregate_result)
-            append_jsonl(
-                log_path,
-                {
-                    "event": "width_completed",
-                    "width": width,
-                    "status": aggregate_result.status,
-                    "reason": aggregate_result.reason,
-                },
-            )
-            if aggregate_result.status == "passed":
-                selected = aggregate_result
-                break
-        if selected is not None:
-            widths = [replace(item, status="advanced") if item.status == "failed" else item for item in widths]
-            attempted = {item.width for item in widths}
-            widths.extend(
-                WidthAggregate(
-                    width,
-                    (),
-                    {},
-                    None,
-                    None,
-                    GateResult(False, {}, {}, ("not_attempted_after_first_pass",)),
-                    "not_attempted",
-                    "not_attempted_after_first_pass",
-                )
-                for width in WIDTHS
-                if width not in attempted
-            )
-            _write_comparison(
-                staging.staging,
-                _comparison_payload(widths, status="frozen", selected=selected, config=config),
-            )
-            staging.write_manifest(
-                _selection_manifest(config, data, staging, "frozen", device, widths, selected, quantizer)
-            )
-            final = staging.finalize()
-            representative = selected.representative
-            assert (
-                representative is not None
-                and representative.tflite is not None
-                and representative.checkpoint_fp32 is not None
-            )
-            checkpoint_relative = representative.checkpoint_qat or representative.checkpoint_fp32
-            return FrozenRun(
-                staging.run_id,
-                final,
-                selected.width,
-                representative.seed,
-                final / checkpoint_relative,
-                final / representative.tflite,
-                representative.route or "ptq",
-                representative.int8_metrics or representative.fp32_metrics,
-                best_epoch=representative.best_epoch,
-            )
-        attempted = {item.width for item in widths}
-        failed_indexes = [index for index, item in enumerate(widths) if item.status == "failed"]
-        if failed_indexes:
-            last_failed = failed_indexes[-1]
-            widths = [
-                replace(item, status="advanced") if item.status == "failed" and index != last_failed else item
-                for index, item in enumerate(widths)
-            ]
-        widths.extend(
-            WidthAggregate(
-                width,
-                (),
-                {},
-                None,
-                None,
-                GateResult(False, {}, {}, ("not_attempted",)),
-                "not_attempted",
-                "not_attempted",
-            )
-            for width in WIDTHS
-            if width not in attempted
-        )
-        _write_comparison(
-            staging.staging,
-            _comparison_payload(widths, status="selection_failed", selected=None, config=config),
-        )
-        staging.write_manifest(
-            _selection_manifest(
-                config,
-                data,
-                staging,
-                "selection_failed",
-                device,
-                widths,
-                None,
-                quantizer,
-            )
-        )
-        final = staging.finalize()
-        raise SelectionFailed(final)
-    except SelectionFailed:
-        raise
-    except Exception as exc:
-        append_jsonl(
-            log_path,
+            else:
+                stale += 1
+                if stale >= patience:
+                    break
+        if best is None:
+            raise TrainingError("training produced no validation evidence")
+        return SeedEvidence(
+            request.architecture,
+            request.trial.trial_id,
+            request.seed,
+            checkpoint,
+            best,
+            evaluate_predictive_gate(best, config.gates),
+            best_epoch,
             {
-                "event": "selection_failed_unexpected",
-                "error": type(exc).__name__,
-                "message": str(exc),
+                "seed": request.seed,
+                "device": str(device),
+                "workers": workers,
+                "batch_size": batch,
+                "amp": config.training.amp,
+                "tf32": config.training.tf32,
+                "cudnn_benchmark": config.training.cudnn_benchmark,
+                "channels_last": config.training.channels_last,
+                "cuda": torch.version.cuda,
+                "cudnn": torch.backends.cudnn.version(),
+                "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+                "driver": torch.cuda.get_device_properties(0).name if torch.cuda.is_available() else None,
+                "pytorch": torch.__version__,
+                "platform": platform.platform(),
             },
+            False,
         )
-        if staging.staging.exists():
-            _write_comparison(
-                staging.staging,
-                _comparison_payload(widths, status="selection_failed", selected=None, config=config),
-            )
-            staging.write_manifest(
-                _selection_manifest(
-                    config,
-                    data,
-                    staging,
-                    "selection_failed",
-                    device,
-                    widths,
-                    None,
-                    quantizer,
-                )
-            )
-            final = staging.finalize()
-            raise SelectionFailed(final, f"unexpected selection error: {exc}") from exc
-        raise
 
-
-def train_one_seed(
-    config: AppConfig,
-    data: TrainingData,
-    width: float,
-    seed: int,
-    directory: Path,
-    *,
-    model_factory: Callable[[str, int], nn.Module] | None = None,
-    toolchain: SelectionQuantizer | None = None,
-    quantization_runner: Callable[..., Any] | None = None,
-) -> SeedResult:
-    """Train/evaluate one DS-CNN width and seed without reserved-test access."""
-    return _seed_result(
-        config,
-        data,
-        width,
-        seed,
-        directory,
-        _device(config.training.device),
-        model_factory,
-        toolchain or _DefaultToolchain(),
-        quantization_runner,
-    )
-
-
-def run_training(
-    config: AppConfig,
-    model_factory: Callable[[str, int], nn.Module] | None = None,
-    preflight_runner: Callable[[AppConfig, TrainingData, Path], dict] | None = None,
-    *,
-    toolchain: SelectionQuantizer | None = None,
-    quantization_runner: Callable[..., Any] | None = None,
-) -> FrozenRun:
-    """Train and freeze the first eligible DS-CNN candidate."""
-    return _run_selection(
-        config,
-        model_factory=model_factory,
-        toolchain=toolchain,
-        quantization_runner=quantization_runner,
-        preflight_runner=preflight_runner,
-    )
+    @staticmethod
+    def _lr(architecture: str, trial: RecipeSpec) -> float:
+        return learning_rate_for(architecture, trial)

@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tuning-split/v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "partition", "tuning_fraction", "class_counts", "tuning_class_counts", "optimization_class_counts", "tuning", "optimization", "tuning_hash", "optimization_hash", "split_hash"],
+  "properties": {
+    "schema": {"const": "tuning-split/v1"},
+    "partition": {"const": "Training"},
+    "tuning_fraction": {"const": 0.2},
+    "class_counts": {"type": "object"},
+    "tuning_class_counts": {"type": "object"},
+    "optimization_class_counts": {"type": "object"},
+    "tuning": {"type": "array", "items": {"$ref": "#/$defs/entry"}},
+    "optimization": {"type": "array", "items": {"$ref": "#/$defs/entry"}},
+    "tuning_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "optimization_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "split_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+  },
+  "$defs": {
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["global_index", "label", "row_sha256", "rank"],
+      "properties": {
+        "global_index": {"type": "integer", "minimum": 0},
+        "label": {"type": "integer", "minimum": 0, "maximum": 3},
+        "row_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "rank": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+      }
+    }
+  }
+}

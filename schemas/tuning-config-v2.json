@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tuning-config/v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "training_config", "architectures", "seeds", "trial_grid", "tuning_fraction"],
+  "properties": {
+    "schema": {"const": "tuning-config/v2"},
+    "training_config": {"type": "string"},
+    "architectures": {"const": ["DS-CNN", "MobileNetV3-Small", "ResNet-18"]},
+    "seeds": {"const": [42, 43, 44]},
+    "trial_grid": {
+      "type": "array",
+      "minItems": 9,
+      "maxItems": 9,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "trial_id",
+          "augmentation",
+          "loss",
+          "class_weight_exponent",
+          "focal_gamma",
+          "learning_rate",
+          "policy"
+        ],
+        "properties": {
+          "trial_id": {"pattern": "^T[0-8]$"},
+          "augmentation": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["flip", "rotation", "translate", "scale_min", "scale_max", "brightness", "contrast"],
+            "properties": {
+              "flip": {"type": "number", "minimum": 0, "maximum": 1},
+              "rotation": {"type": "number", "minimum": 0},
+              "translate": {"type": "number", "minimum": 0},
+              "scale_min": {"type": "number", "exclusiveMinimum": 0},
+              "scale_max": {"type": "number", "exclusiveMinimum": 0},
+              "brightness": {"type": "number", "minimum": 0},
+              "contrast": {"type": "number", "minimum": 0}
+            }
+          },
+          "loss": {"enum": ["weighted_ce", "focal", "balanced_softmax"]},
+          "class_weight_exponent": {"type": ["number", "null"]},
+          "focal_gamma": {"type": ["number", "null"]},
+          "learning_rate": {"enum": ["base", "low"]},
+          "policy": {"enum": ["full", "classifier-only"]},
+          "label_smoothing": {"type": "number", "minimum": 0, "exclusiveMaximum": 1},
+          "warmup_epochs": {"type": "integer", "minimum": 0},
+          "gradient_clip_norm": {"type": ["number", "null"], "exclusiveMinimum": 0}
+        }
+      }
+    },
+    "tuning_fraction": {"const": 0.2}
+  }
+}

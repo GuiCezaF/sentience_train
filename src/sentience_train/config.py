@@ -1,21 +1,57 @@
-"""Strict, immutable configuration loading for reproducible selection."""
+"""Public immutable configuration contracts for the ONNX-only pipeline."""
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
 import yaml
 
+from .recipes import AugmentationConfig, RecipeSpec, default_recipe_grid
 
 LABELS = ("angry", "happy", "neutral", "sad")
-WIDTHS = (0.25, 0.35, 0.50)
 SEEDS = (42, 43, 44)
+ARCHITECTURES = ("DS-CNN", "MobileNetV3-Small", "ResNet-18")
+NORMALIZATION_FORMULA = "float32(pixel) / 127.5 - 1.0"
+NORMALIZATION_ORDER = ("cast_float32", "divide_127.5", "subtract_1.0")
+RGB_KERNEL_TRANSFORM = "rgb-kernel-sum/v1"
+
+TRAINING_CONFIG_SCHEMA = "training-config/v2"
+TUNING_CONFIG_SCHEMA = "tuning-config/v2"
+TUNING_PLAN_SCHEMA = "tuning-plan/v2"
+TUNING_CAMPAIGN_SCHEMA = "tuning-campaign/v2"
+TRAINING_RUN_SCHEMA = "training-run/v2"
+RELEASE_BUNDLE_SCHEMA = "release-bundle/v2"
+RELEASE_METRICS_SCHEMA = "release-metrics/v2"
+PRIVATE_TEST_ACCESS_SCHEMA = "private-test-access/v2"
+ONNX_CONTRACT_SCHEMA = "onnx-contract/v1"
+HOST_BENCHMARK_SCHEMA = "host-benchmark/v1"
+TUNING_SPLIT_SCHEMA = "tuning-split/v1"
 
 
 class ConfigError(ValueError):
-    """Raised when a configuration document is not part of the public schema."""
+    """Raised for invalid, unsupported, or identity-incompatible input."""
+
+
+def canonical_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def canonical_hash(value: Any) -> str:
+    return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def _paths(value: Any) -> Any:
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, tuple):
+        return [_paths(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _paths(item) for key, item in value.items()}
+    return value
 
 
 @dataclass(frozen=True)
@@ -26,400 +62,350 @@ class DataConfig:
 
 @dataclass(frozen=True)
 class ModelConfig:
+    architectures: tuple[str, ...] = ARCHITECTURES
+    weights_dir: Path = Path("models/pretrained")
     num_classes: int = 4
 
 
 @dataclass(frozen=True)
-class TrainingConfig:
-    batch_size: int = 128
-    epochs: int = 100
-    device: str = "auto"
-    num_workers: int = 0
-    scheduler: str = "cosine"
-
-
-@dataclass(frozen=True)
-class SelectionConfig:
-    widths: tuple[float, ...] = WIDTHS
-    seeds: tuple[int, ...] = SEEDS
-    representative: str = "median_int8_macro_f1_then_lowest_seed"
+class TrainingSettings:
+    batch_size: int | str = "auto"
+    workers: int | str = "auto"
+    device: str = "cuda:0"
+    amp: bool = True
+    tf32: bool = True
+    cudnn_benchmark: bool = True
+    channels_last: bool = True
+    optimizer: str = "AdamW"
+    weight_decay: float = 1e-4
+    triage_epochs: int = 60
+    triage_patience: int = 10
+    full_epochs: int = 100
+    full_patience: int = 15
 
 
 @dataclass(frozen=True)
 class QualityGatesConfig:
     accuracy: float = 0.70
     macro_f1: float = 0.65
-    recall: float = 0.55
-    max_accuracy_delta: float = 0.02
-    tflite_bytes: int = 1_048_576
-    arena_with_margin_bytes: int = 1_572_864
-    macs: int = 15_000_000
+    min_recall: float = 0.55
+    max_onnx_bytes: int = 52_428_800
+    max_p95_ms: float = 10.0
+    max_rss_increment_bytes: int = 134_217_728
+    parity_atol: float = 1e-5
+    parity_rtol: float = 1e-4
 
 
 @dataclass(frozen=True)
-class QATConfig:
-    enabled: bool = True
-    epochs: int = 20
-    lr: float = 1e-5
+class OutputConfig:
+    runs_dir: Path = Path("artifacts/runs")
+    campaigns_dir: Path = Path("artifacts/campaigns")
+    exports_dir: Path = Path("artifacts/exports")
 
 
 @dataclass(frozen=True)
-class QuantizationConfig:
-    calibration_seed: int = 42
-    calibration_examples: int = 512
-    qat: QATConfig = QATConfig()
-
-
-@dataclass(frozen=True)
-class OptimizerConfig:
-    name: str = "adamw"
-    lr: float = 1e-3
-    weight_decay: float = 1e-4
-
-
-@dataclass(frozen=True)
-class EarlyStoppingConfig:
-    patience: int = 12
-    min_delta: float = 0.002
-
-
-@dataclass(frozen=True)
-class AugmentationConfig:
-    horizontal_flip_probability: float = 0.5
-    rotation_degrees: float = 10.0
-    translate_fraction: float = 0.08
-    scale_min: float = 0.95
-    scale_max: float = 1.05
-    brightness: float = 0.15
-    contrast: float = 0.15
-
-
-@dataclass(frozen=True)
-class RunConfig:
-    directory: Path = Path("runs")
-
-
-@dataclass(frozen=True)
-class AppConfig:
+class TrainingConfig:
+    schema: str
     data: DataConfig
     model: ModelConfig
-    training: TrainingConfig
-    selection: SelectionConfig
-    quality_gates: QualityGatesConfig
-    quantization: QuantizationConfig
-    optimizer: OptimizerConfig
-    early_stopping: EarlyStoppingConfig
-    augmentation: AugmentationConfig
-    run: RunConfig
+    training: TrainingSettings
+    gates: QualityGatesConfig
+    output: OutputConfig
     source_path: Path
 
     def resolved_dict(self) -> dict[str, Any]:
-        """Serialize the effective public policy."""
-        value = asdict(self)
-        value.pop("source_path", None)
-        return _paths_to_strings(value)
+        return _paths(
+            {
+                "schema": self.schema,
+                "data": asdict(self.data),
+                "model": asdict(self.model),
+                "training": asdict(self.training),
+                "gates": asdict(self.gates),
+                "output": asdict(self.output),
+            }
+        )
 
 
-_SCHEMA: dict[str, set[str]] = {
-    "root": {
-        "data",
-        "model",
-        "training",
-        "selection",
-        "quality_gates",
-        "quantization",
-        "optimizer",
-        "early_stopping",
-        "augmentation",
-        "run",
-    },
-    "data": {"csv_path", "classes"},
-    "model": {"num_classes"},
-    "training": {"batch_size", "epochs", "device", "num_workers", "scheduler"},
-    "selection": {"widths", "seeds", "representative"},
-    "quality_gates": {
-        "accuracy",
-        "macro_f1",
-        "recall",
-        "max_accuracy_delta",
-        "tflite_bytes",
-        "arena_with_margin_bytes",
-        "macs",
-    },
-    "quantization": {"calibration_seed", "calibration_examples", "qat"},
-    "qat": {"enabled", "epochs", "lr"},
-    "optimizer": {"name", "lr", "weight_decay"},
-    "early_stopping": {"patience", "min_delta"},
-    "augmentation": {
-        "horizontal_flip_probability",
-        "rotation_degrees",
-        "translate_fraction",
-        "scale_min",
-        "scale_max",
-        "brightness",
-        "contrast",
-    },
-    "run": {"directory"},
-}
+@dataclass(frozen=True)
+class TuningConfig:
+    schema: str
+    training_config: Path
+    architectures: tuple[str, ...]
+    seeds: tuple[int, ...]
+    trial_grid: tuple[RecipeSpec, ...]
+    tuning_fraction: float
+    source_path: Path
+
+    def resolved_dict(self) -> dict[str, Any]:
+        return {
+            "schema": self.schema,
+            "training_config": str(self.training_config),
+            "architectures": list(self.architectures),
+            "seeds": list(self.seeds),
+            "trial_grid": [item.to_dict() for item in self.trial_grid],
+            "tuning_fraction": self.tuning_fraction,
+        }
 
 
-def _paths_to_strings(value: Any) -> Any:
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, dict):
-        return {key: _paths_to_strings(item) for key, item in value.items()}
-    if isinstance(value, tuple):
-        return [_paths_to_strings(item) for item in value]
+def _mapping(value: Any, where: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ConfigError(f"{where} must be an object")
     return value
 
 
-def _mapping(value: Any, where: str) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        raise ConfigError(f"{where} must be a mapping, received {type(value).__name__}")
-    return value
-
-
-def _strict_keys(value: Mapping[str, Any], section: str, *, required: set[str] | None = None) -> None:
-    unknown = set(value) - _SCHEMA[section]
+def _strict(value: Mapping[str, Any], allowed: set[str], where: str, required: set[str] | None = None) -> None:
+    unknown = set(value) - allowed
     missing = (required or set()) - set(value)
     if unknown:
-        raise ConfigError(f"{section}: unknown key(s): {', '.join(sorted(unknown))}")
+        raise ConfigError(f"{where}: unknown key(s): {', '.join(sorted(unknown))}")
     if missing:
-        raise ConfigError(f"{section}: missing key(s): {', '.join(sorted(missing))}")
+        raise ConfigError(f"{where}: missing key(s): {', '.join(sorted(missing))}")
 
 
-def _int(value: Any, where: str, minimum: int | None = None, maximum: int | None = None) -> int:
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise ConfigError(f"{where} must be an integer, received {value!r}")
-    if minimum is not None and value < minimum:
-        raise ConfigError(f"{where} must be >= {minimum}, received {value!r}")
+def _int(value: Any, where: str, minimum: int = 0, maximum: int | None = None) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        raise ConfigError(f"{where} must be an integer >= {minimum}")
     if maximum is not None and value > maximum:
-        raise ConfigError(f"{where} must be <= {maximum}, received {value!r}")
+        raise ConfigError(f"{where} must be <= {maximum}")
     return value
 
 
-def _float(value: Any, where: str, minimum: float | None = None, maximum: float | None = None) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ConfigError(f"{where} must be a number, received {value!r}")
-    converted = float(value)
-    if minimum is not None and converted < minimum:
-        raise ConfigError(f"{where} must be >= {minimum}, received {value!r}")
-    if maximum is not None and converted > maximum:
-        raise ConfigError(f"{where} must be <= {maximum}, received {value!r}")
-    return converted
+def _number(value: Any, where: str, minimum: float = 0.0) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or float(value) < minimum:
+        raise ConfigError(f"{where} must be a number >= {minimum}")
+    return float(value)
 
 
-def _str(value: Any, where: str) -> str:
-    if not isinstance(value, str):
-        raise ConfigError(f"{where} must be a string, received {value!r}")
-    return value
-
-
-def _bool(value: Any, where: str) -> bool:
+def _flag(value: Any, where: str) -> bool:
     if not isinstance(value, bool):
-        raise ConfigError(f"{where} must be boolean, received {value!r}")
+        raise ConfigError(f"{where} must be boolean")
     return value
 
 
-def _apply_overrides(document: dict[str, Any], overrides: Mapping[str, Any] | None) -> None:
-    for dotted_key, value in (overrides or {}).items():
-        pieces = dotted_key.split(".")
-        target: dict[str, Any] = document
-        for piece in pieces[:-1]:
-            child = target.get(piece)
-            if not isinstance(child, dict):
-                raise ConfigError(f"override {dotted_key!r} does not name a configuration value")
-            target = child
-        if pieces[-1] not in target:
-            raise ConfigError(f"override {dotted_key!r} does not name a configuration value")
-        target[pieces[-1]] = value
+def _path(value: Any, where: str, base: Path) -> Path:
+    if not isinstance(value, str) or not value:
+        raise ConfigError(f"{where} must be a non-empty path")
+    path = Path(value)
+    return (base / path).resolve() if not path.is_absolute() else path.resolve()
 
 
-def _defaults(document: dict[str, Any]) -> None:
-    defaults: dict[str, dict[str, Any]] = {
-        "selection": {
-            "widths": list(WIDTHS),
-            "seeds": list(SEEDS),
-            "representative": "median_int8_macro_f1_then_lowest_seed",
-        },
-        "quality_gates": asdict(QualityGatesConfig()),
-        "quantization": {
-            "calibration_seed": 42,
-            "calibration_examples": 512,
-            "qat": asdict(QATConfig()),
-        },
-    }
-    for section, values in defaults.items():
-        current = document.setdefault(section, {})
-        if not isinstance(current, dict):
-            continue
-        for key, value in values.items():
-            current.setdefault(key, value)
-    document["quantization"].setdefault("qat", asdict(QATConfig()))
-
-
-def load_config(path: str | Path, overrides: Mapping[str, Any] | None = None) -> AppConfig:
-    """Load and validate one YAML document, resolving paths from its directory."""
-    source_path = Path(path).expanduser().resolve()
+def _read(path: str | Path) -> tuple[Path, Mapping[str, Any]]:
+    source = Path(path).expanduser().resolve()
     try:
-        loaded = yaml.safe_load(source_path.read_text(encoding="utf-8"))
-    except OSError as exc:
-        raise ConfigError(f"cannot read configuration {source_path}: {exc}") from exc
-    except yaml.YAMLError as exc:
-        raise ConfigError(f"invalid YAML in {source_path}: {exc}") from exc
-    document = _mapping(loaded, "root")
-    _defaults(document)
-    _apply_overrides(document, overrides)
-    _strict_keys(document, "root")
-    required = {
-        "data": {"csv_path", "classes"},
-        "model": {"num_classes"},
-        "training": {"batch_size", "epochs", "device", "num_workers", "scheduler"},
-        "optimizer": {"name", "lr", "weight_decay"},
-        "early_stopping": {"patience", "min_delta"},
-        "augmentation": {
-            "horizontal_flip_probability",
-            "rotation_degrees",
-            "translate_fraction",
-            "scale_min",
-            "scale_max",
-            "brightness",
-            "contrast",
+        loaded = yaml.safe_load(source.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as exc:
+        raise ConfigError(f"cannot read configuration {source}: {exc}") from exc
+    return source, _mapping(loaded, "root")
+
+
+def load_training_config(path: str | Path) -> TrainingConfig:
+    source, document = _read(path)
+    _strict(
+        document,
+        {"schema", "data", "model", "training", "gates", "output"},
+        "root",
+        {"schema", "data", "model", "training", "gates", "output"},
+    )
+    if document["schema"] != TRAINING_CONFIG_SCHEMA:
+        raise ConfigError(f"expected {TRAINING_CONFIG_SCHEMA}, received {document['schema']!r}")
+
+    data = _mapping(document["data"], "data")
+    _strict(data, {"csv_path", "classes"}, "data", {"csv_path", "classes"})
+    classes = tuple(data["classes"]) if isinstance(data["classes"], list) else ()
+    if classes != LABELS:
+        raise ConfigError(f"data.classes must be exactly {list(LABELS)!r}")
+
+    model = _mapping(document["model"], "model")
+    _strict(model, {"architectures", "weights_dir", "num_classes"}, "model")
+    architectures = tuple(model.get("architectures", ARCHITECTURES))
+    if (
+        not architectures
+        or any(item not in ARCHITECTURES for item in architectures)
+        or len(set(architectures)) != len(architectures)
+    ):
+        raise ConfigError(f"model.architectures must be a unique subset of {list(ARCHITECTURES)!r}")
+    num_classes = _int(model.get("num_classes", 4), "model.num_classes", 4, 4)
+
+    training = _mapping(document["training"], "training")
+    _strict(
+        training,
+        {
+            "batch_size",
+            "workers",
+            "device",
+            "amp",
+            "tf32",
+            "cudnn_benchmark",
+            "channels_last",
+            "optimizer",
+            "weight_decay",
+            "triage_epochs",
+            "triage_patience",
+            "full_epochs",
+            "full_patience",
         },
-        "run": {"directory"},
-        "selection": {"widths", "seeds", "representative"},
-        "quality_gates": set(_SCHEMA["quality_gates"]),
-        "quantization": {"calibration_seed", "calibration_examples", "qat"},
-    }
-    for section in _SCHEMA["root"]:
-        document[section] = _mapping(document[section], section)
-        _strict_keys(document[section], section, required=required.get(section))
-    document["quantization"]["qat"] = _mapping(document["quantization"]["qat"], "qat")
-    _strict_keys(document["quantization"]["qat"], "qat", required=set(_SCHEMA["qat"]))
+        "training",
+    )
+    batch = training.get("batch_size", "auto")
+    if batch != "auto":
+        batch = _int(batch, "training.batch_size", 1)
+    workers = training.get("workers", "auto")
+    if workers != "auto":
+        workers = _int(workers, "training.workers", 0)
+    device = training.get("device", "cuda:0")
+    if device not in {"cuda:0", "cpu"}:
+        raise ConfigError("training.device must be 'cuda:0' or 'cpu'")
+    optimizer = training.get("optimizer", "AdamW")
+    if optimizer != "AdamW":
+        raise ConfigError("training.optimizer must be AdamW")
+    settings = TrainingSettings(
+        batch,
+        workers,
+        device,
+        _flag(training.get("amp", True), "training.amp"),
+        _flag(training.get("tf32", True), "training.tf32"),
+        _flag(training.get("cudnn_benchmark", True), "training.cudnn_benchmark"),
+        _flag(training.get("channels_last", True), "training.channels_last"),
+        optimizer,
+        _number(training.get("weight_decay", 1e-4), "training.weight_decay"),
+        _int(training.get("triage_epochs", 60), "training.triage_epochs", 1, 60),
+        _int(training.get("triage_patience", 10), "training.triage_patience", 1, 10),
+        _int(training.get("full_epochs", 100), "training.full_epochs", 1, 100),
+        _int(training.get("full_patience", 15), "training.full_patience", 1, 15),
+    )
 
-    data = document["data"]
-    classes = data["classes"]
-    if not isinstance(classes, list) or any(not isinstance(item, str) for item in classes) or tuple(classes) != LABELS:
-        raise ConfigError(f"data.classes must be exactly {list(LABELS)!r}, received {classes!r}")
-    csv_path = Path(_str(data["csv_path"], "data.csv_path"))
-    if not csv_path.is_absolute():
-        csv_path = source_path.parent / csv_path
+    gates = _mapping(document["gates"], "gates")
+    _strict(
+        gates,
+        {
+            "accuracy",
+            "macro_f1",
+            "min_recall",
+            "max_onnx_bytes",
+            "max_p95_ms",
+            "max_rss_increment_bytes",
+            "parity_atol",
+            "parity_rtol",
+        },
+        "gates",
+    )
+    gate_config = QualityGatesConfig(
+        _number(gates.get("accuracy", 0.70), "gates.accuracy"),
+        _number(gates.get("macro_f1", 0.65), "gates.macro_f1"),
+        _number(gates.get("min_recall", 0.55), "gates.min_recall"),
+        _int(gates.get("max_onnx_bytes", 52_428_800), "gates.max_onnx_bytes", 1),
+        _number(gates.get("max_p95_ms", 10.0), "gates.max_p95_ms"),
+        _int(gates.get("max_rss_increment_bytes", 134_217_728), "gates.max_rss_increment_bytes", 1),
+        _number(gates.get("parity_atol", 1e-5), "gates.parity_atol"),
+        _number(gates.get("parity_rtol", 1e-4), "gates.parity_rtol"),
+    )
 
-    model = document["model"]
-    num_classes = _int(model["num_classes"], "model.num_classes", 1)
-    if num_classes != len(LABELS):
-        raise ConfigError(f"model.num_classes must be {len(LABELS)}, received {num_classes}")
-
-    training = document["training"]
-    device = _str(training["device"], "training.device")
-    if device not in {"auto", "cpu", "cuda"}:
-        raise ConfigError(f"training.device must be auto, cpu, or cuda, received {device!r}")
-    scheduler = _str(training["scheduler"], "training.scheduler")
-    if scheduler != "cosine":
-        raise ConfigError("training.scheduler must be 'cosine'")
-    _validate_selection(document["selection"])
-    gates = _parse_gates(document["quality_gates"])
-    quantization = _parse_quantization(document["quantization"])
-
-    optimizer = document["optimizer"]
-    optimizer_name = _str(optimizer["name"], "optimizer.name")
-    if optimizer_name != "adamw":
-        raise ConfigError("optimizer.name must be 'adamw'")
-    early = document["early_stopping"]
-    aug = document["augmentation"]
-    scale_min = _float(aug["scale_min"], "augmentation.scale_min", 0.01)
-    scale_max = _float(aug["scale_max"], "augmentation.scale_max", scale_min)
-    if scale_max < scale_min:
-        raise ConfigError("augmentation.scale_max must be >= augmentation.scale_min")
-    run_dir = Path(_str(document["run"]["directory"], "run.directory"))
-    if not run_dir.is_absolute():
-        run_dir = source_path.parent / run_dir
-
-    return AppConfig(
-        data=DataConfig(csv_path=csv_path.resolve(), classes=tuple(classes)),
-        model=ModelConfig(num_classes=num_classes),
-        training=TrainingConfig(
-            batch_size=_int(training["batch_size"], "training.batch_size", 1),
-            epochs=_int(training["epochs"], "training.epochs", 1, 100),
-            device=device,
-            num_workers=_int(training["num_workers"], "training.num_workers", 0),
-            scheduler=scheduler,
+    output = _mapping(document["output"], "output")
+    _strict(
+        output, {"runs_dir", "campaigns_dir", "exports_dir"}, "output", {"runs_dir", "campaigns_dir", "exports_dir"}
+    )
+    return TrainingConfig(
+        TRAINING_CONFIG_SCHEMA,
+        DataConfig(_path(data["csv_path"], "data.csv_path", source.parent), classes),
+        ModelConfig(
+            architectures,
+            _path(model.get("weights_dir", "models/pretrained"), "model.weights_dir", source.parent),
+            num_classes,
         ),
-        selection=SelectionConfig(**_selection_values(document["selection"])),
-        quality_gates=gates,
-        quantization=quantization,
-        optimizer=OptimizerConfig(
-            name=optimizer_name,
-            lr=_float(optimizer["lr"], "optimizer.lr", 0.0),
-            weight_decay=_float(optimizer["weight_decay"], "optimizer.weight_decay", 0.0),
+        settings,
+        gate_config,
+        OutputConfig(
+            _path(output["runs_dir"], "output.runs_dir", source.parent),
+            _path(output["campaigns_dir"], "output.campaigns_dir", source.parent),
+            _path(output["exports_dir"], "output.exports_dir", source.parent),
         ),
-        early_stopping=EarlyStoppingConfig(
-            patience=_int(early["patience"], "early_stopping.patience", 1),
-            min_delta=_float(early["min_delta"], "early_stopping.min_delta", 0.0),
-        ),
-        augmentation=AugmentationConfig(
-            horizontal_flip_probability=_float(
-                aug["horizontal_flip_probability"],
-                "augmentation.horizontal_flip_probability",
-                0.0,
-                1.0,
-            ),
-            rotation_degrees=_float(aug["rotation_degrees"], "augmentation.rotation_degrees", 0.0),
-            translate_fraction=_float(aug["translate_fraction"], "augmentation.translate_fraction", 0.0, 1.0),
-            scale_min=scale_min,
-            scale_max=scale_max,
-            brightness=_float(aug["brightness"], "augmentation.brightness", 0.0, 1.0),
-            contrast=_float(aug["contrast"], "augmentation.contrast", 0.0, 1.0),
-        ),
-        run=RunConfig(directory=run_dir.resolve()),
-        source_path=source_path,
+        source,
     )
 
 
-def _validate_selection(value: Mapping[str, Any]) -> None:
-    widths = value["widths"]
-    seeds = value["seeds"]
-    if not isinstance(widths, list) or tuple(float(item) for item in widths) != WIDTHS:
-        raise ConfigError(f"selection.widths must be exactly {list(WIDTHS)!r}")
-    if not isinstance(seeds, list) or tuple(seeds) != SEEDS:
-        raise ConfigError(f"selection.seeds must be exactly {list(SEEDS)!r}")
-    if value["representative"] != "median_int8_macro_f1_then_lowest_seed":
-        raise ConfigError("selection.representative is fixed to median_int8_macro_f1_then_lowest_seed")
-
-
-def _selection_values(value: Mapping[str, Any]) -> dict[str, Any]:
-    return {
-        "widths": tuple(float(item) for item in value["widths"]),
-        "seeds": tuple(int(item) for item in value["seeds"]),
-        "representative": value["representative"],
-    }
-
-
-def _parse_gates(value: Mapping[str, Any]) -> QualityGatesConfig:
-    gates = QualityGatesConfig(
-        accuracy=_float(value["accuracy"], "quality_gates.accuracy", 0.0, 1.0),
-        macro_f1=_float(value["macro_f1"], "quality_gates.macro_f1", 0.0, 1.0),
-        recall=_float(value["recall"], "quality_gates.recall", 0.0, 1.0),
-        max_accuracy_delta=_float(value["max_accuracy_delta"], "quality_gates.max_accuracy_delta", 0.0),
-        tflite_bytes=_int(value["tflite_bytes"], "quality_gates.tflite_bytes", 1),
-        arena_with_margin_bytes=_int(value["arena_with_margin_bytes"], "quality_gates.arena_with_margin_bytes", 1),
-        macs=_int(value["macs"], "quality_gates.macs", 1),
+def _parse_trial(value: Mapping[str, Any], index: int) -> RecipeSpec:
+    _strict(
+        value,
+        {
+            "trial_id",
+            "augmentation",
+            "loss",
+            "class_weight_exponent",
+            "focal_gamma",
+            "learning_rate",
+            "policy",
+            "label_smoothing",
+            "warmup_epochs",
+            "gradient_clip_norm",
+        },
+        "trial",
+        {"trial_id", "augmentation", "loss", "class_weight_exponent", "focal_gamma", "learning_rate", "policy"},
     )
-    return gates
-
-
-def _parse_quantization(value: Mapping[str, Any]) -> QuantizationConfig:
-    if _int(value["calibration_seed"], "quantization.calibration_seed", 0) != 42:
-        raise ConfigError("quantization.calibration_seed is fixed to 42")
-    if _int(value["calibration_examples"], "quantization.calibration_examples", 1) != 512:
-        raise ConfigError("quantization.calibration_examples is fixed to 512")
-    qat = value["qat"]
-    return QuantizationConfig(
-        calibration_seed=42,
-        calibration_examples=512,
-        qat=QATConfig(
-            enabled=_bool(qat["enabled"], "quantization.qat.enabled"),
-            epochs=_int(qat["epochs"], "quantization.qat.epochs", 1, 20),
-            lr=_float(qat["lr"], "quantization.qat.lr", 0.0),
+    augmentation = _mapping(value["augmentation"], "trial.augmentation")
+    _strict(
+        augmentation,
+        {"flip", "rotation", "translate", "scale_min", "scale_max", "brightness", "contrast"},
+        "trial.augmentation",
+        {"flip", "rotation", "translate", "scale_min", "scale_max", "brightness", "contrast"},
+    )
+    trial_id = value["trial_id"]
+    if trial_id != f"T{index}":
+        raise ConfigError("trial_grid must use canonical ids T0 through T8")
+    label_smoothing = _number(value.get("label_smoothing", 0.0), "trial.label_smoothing")
+    if label_smoothing >= 1.0:
+        raise ConfigError("trial.label_smoothing must be < 1")
+    gradient_clip = value.get("gradient_clip_norm")
+    if gradient_clip is not None:
+        gradient_clip = _number(gradient_clip, "trial.gradient_clip_norm")
+        if gradient_clip == 0:
+            raise ConfigError("trial.gradient_clip_norm must be > 0")
+    return RecipeSpec(
+        trial_id,
+        AugmentationConfig(
+            *(
+                float(augmentation[key])
+                for key in ("flip", "rotation", "translate", "scale_min", "scale_max", "brightness", "contrast")
+            )
         ),
+        str(value["loss"]),
+        value["class_weight_exponent"],
+        value["focal_gamma"],
+        str(value["learning_rate"]),
+        str(value["policy"]),
+        label_smoothing,
+        _int(value.get("warmup_epochs", 0), "trial.warmup_epochs", 0, 20),
+        gradient_clip,
+    )
+
+
+def load_tuning_config(path: str | Path) -> TuningConfig:
+    source, document = _read(path)
+    _strict(
+        document,
+        {"schema", "training_config", "architectures", "seeds", "trial_grid", "tuning_fraction"},
+        "root",
+        {"schema", "training_config", "architectures", "seeds", "trial_grid", "tuning_fraction"},
+    )
+    if document["schema"] != TUNING_CONFIG_SCHEMA:
+        raise ConfigError(f"expected {TUNING_CONFIG_SCHEMA}, received {document['schema']!r}")
+    architectures = tuple(document["architectures"])
+    if architectures != ARCHITECTURES:
+        raise ConfigError("tuning.architectures must enumerate the three fixed architectures in order")
+    seeds = tuple(document["seeds"])
+    if seeds != SEEDS:
+        raise ConfigError("tuning.seeds must be exactly [42, 43, 44]")
+    if float(document["tuning_fraction"]) != 0.20:
+        raise ConfigError("tuning_fraction is fixed at 0.20")
+    grid = tuple(_parse_trial(_mapping(item, f"trial_grid[{i}]"), i) for i, item in enumerate(document["trial_grid"]))
+    canonical_grid = default_recipe_grid()
+    if [item.to_dict() for item in grid] != [item.to_dict() for item in canonical_grid]:
+        raise ConfigError("trial_grid must match the fixed T0..T8 policy exactly")
+    return TuningConfig(
+        TUNING_CONFIG_SCHEMA,
+        _path(document["training_config"], "training_config", source.parent),
+        architectures,
+        seeds,
+        grid,
+        0.20,
+        source,
     )

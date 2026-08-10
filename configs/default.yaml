@@ -1,47 +1,35 @@
+schema: training-config/v2
 data:
-  csv_path: ../dataset/fer2013.csv
+  csv_path: ../data/raw/fer2013.csv
   classes: [angry, happy, neutral, sad]
 model:
+  architectures: [DS-CNN, MobileNetV3-Small, ResNet-18]
+  weights_dir: ../models/pretrained
   num_classes: 4
 training:
   batch_size: 128
-  epochs: 100
-  device: auto
-  num_workers: 0
-  scheduler: cosine
-selection:
-  widths: [0.25, 0.35, 0.50]
-  seeds: [42, 43, 44]
-  representative: median_int8_macro_f1_then_lowest_seed
-quality_gates:
-  accuracy: 0.70
-  macro_f1: 0.65
-  recall: 0.55
-  max_accuracy_delta: 0.02
-  tflite_bytes: 1048576
-  arena_with_margin_bytes: 1572864
-  macs: 15000000
-quantization:
-  calibration_seed: 42
-  calibration_examples: 512
-  qat:
-    enabled: true
-    epochs: 20
-    lr: 0.00001
-optimizer:
-  name: adamw
-  lr: 0.001
+  workers: auto
+  device: cuda:0
+  amp: true
+  tf32: true
+  cudnn_benchmark: true
+  channels_last: true
+  optimizer: AdamW
   weight_decay: 0.0001
-early_stopping:
-  patience: 12
-  min_delta: 0.002
-augmentation:
-  horizontal_flip_probability: 0.5
-  rotation_degrees: 10.0
-  translate_fraction: 0.08
-  scale_min: 0.95
-  scale_max: 1.05
-  brightness: 0.15
-  contrast: 0.15
-run:
-  directory: ../runs
+  triage_epochs: 60
+  triage_patience: 10
+  full_epochs: 100
+  full_patience: 15
+gates:
+  accuracy: 0.65
+  macro_f1: 0.65
+  min_recall: 0.55
+  max_onnx_bytes: 52428800
+  max_p95_ms: 10.0
+  max_rss_increment_bytes: 134217728
+  parity_atol: 0.00001
+  parity_rtol: 0.0001
+output:
+  runs_dir: ../artifacts/runs
+  campaigns_dir: ../artifacts/campaigns
+  exports_dir: ../artifacts/exports

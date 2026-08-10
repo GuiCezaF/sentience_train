@@ -1,88 +1,66 @@
-"""Public command line interface for the deterministic training foundation."""
+"""Thin command-line adapter for the four public workflow entry points."""
 
 from __future__ import annotations
 
 import argparse
-import logging
 import sys
-from pathlib import Path
 
-from .config import ConfigError, load_config
+from .campaign import CampaignError, execute_tune
+from .config import ConfigError, canonical_json, load_training_config, load_tuning_config
 from .data import DataValidationError
-from .engine import run_training
-from .export import (
-    ExportCollisionError,
-    ExportInputError,
-    ExportValidationError,
-    export_frozen_run,
-)
-from .selection import SelectionFailed
-
-
-def _epochs(value: str) -> int:
-    parsed = int(value)
-    if not 1 <= parsed <= 100:
-        raise argparse.ArgumentTypeError("--epochs must be between 1 and 100")
-    return parsed
+from .export import export_frozen_run
+from .training import CampaignExhaustedError, TrainingPipelineError, execute_training
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="sentience-train")
     subparsers = parser.add_subparsers(dest="command", required=True)
+    tune = subparsers.add_parser("tune")
+    tune.add_argument("--config", required=True)
+    tune.add_argument("--plan", action="store_true")
     train = subparsers.add_parser("train")
     train.add_argument("--config", required=True)
-    train.add_argument("--epochs", type=_epochs)
-    train.add_argument("--device", choices=("auto", "cpu", "cuda"))
     export = subparsers.add_parser("export")
     export.add_argument("--run-id", required=True)
-    export.add_argument("--format", default="all", choices=("all", "onnx", "tflite"))
-    export.add_argument("--runs-dir", default="./runs")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    if args.command == "export":
-        try:
-            result = export_frozen_run(
-                args.run_id,
-                args.format,
-                runs_root=Path(args.runs_dir),
-                exports_root=Path("./exports"),
-            )
-        except ExportInputError as exc:
-            print(f"input/run error: {exc}", file=sys.stderr)
-            return 2
-        except (ExportCollisionError, ExportValidationError) as exc:
-            print(f"export error: {exc}", file=sys.stderr)
-            return 1
-        except Exception as exc:
-            print(f"export error: {exc}", file=sys.stderr)
-            return 1
-        action = "reused" if result.reused else "created"
-        print(f"{action} {result.status} {result.format} export for {result.run_id}: {result.directory}")
-        return 0 if result.status in {"development", "accepted"} else 1
-
-    overrides = {
-        f"training.{key}": value
-        for key, value in (("epochs", args.epochs), ("device", args.device))
-        if value is not None
-    }
     try:
-        config = load_config(args.config, overrides)
-        logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-        completed = run_training(config)
-    except (ConfigError, DataValidationError) as exc:
-        print(f"configuration/data error: {exc}", file=sys.stderr)
+        if args.command == "tune":
+            tuning = load_tuning_config(args.config)
+            training = load_training_config(tuning.training_config)
+            plan, manifest = execute_tune(tuning, training, plan_only=args.plan)
+            if args.plan:
+                print(canonical_json(plan.document))
+                return 0
+            assert manifest is not None
+            if manifest.document.get("status") == "completed" and manifest.document.get("shortlist"):
+                print(f"completed tuning campaign {manifest.directory.name}: {manifest.directory}")
+                return 0
+            print(f"tuning campaign exhausted: {manifest.directory}", file=sys.stderr)
+            return 1
+        if args.command == "train":
+            config = load_training_config(args.config)
+            directory = execute_training(config)
+            print(f"completed training run {directory.name}: {directory}")
+            return 0
+        result = export_frozen_run(args.run_id)
+        print(f"{result.status} export {result.run_id}: {result.directory}")
+        return 0 if result.status == "accepted" else 1
+    except CampaignExhaustedError as exc:
+        print(f"training error: {exc}", file=sys.stderr)
+        return 1
+    except (ConfigError, DataValidationError, CampaignError) as exc:
+        print(f"input/configuration error: {exc}", file=sys.stderr)
         return 2
-    except SelectionFailed as exc:
-        print(f"selection failed; immutable diagnosis: {exc.diagnosis}", file=sys.stderr)
+    except TrainingPipelineError as exc:
+        print(f"execution error: {exc}", file=sys.stderr)
         return 1
     except Exception as exc:
         print(f"execution error: {exc}", file=sys.stderr)
         return 1
-    print(f"completed run {completed.run_id}: {completed.directory}")
-    return 0
 
 
 if __name__ == "__main__":

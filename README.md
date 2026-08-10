@@ -1,139 +1,89 @@
 # sentience-train
 
-Deterministic training and immutable export of a four-class FER2013 classifier for the ESP32-S3-CAM. The only public workflows are `train` and `export`; selection creates DS-CNN candidates exclusively.
+A reproducible pipeline for tuning, training, and publishing a four-class FP32
+facial-expression classifier in ONNX format. The public contract accepts
+`uint8` NHWC images with shape `[N, 48, 48, 1]` and returns FP32 probabilities
+with shape `[N, 4]`; preprocessing is embedded in the graph.
 
-## Prerequisites and installation
+## Setup
 
-- Python **3.11.15** and uv **0.11.32**, pinned in `mise.toml`;
-- `mise` to provision the versions;
-- the canonical FER2013 CSV and its local data in `dataset/`;
-- a CPU for host validation. CUDA is optional for training.
-
-### Full training and export environment
-
-The complete locked environment requires Linux x86-64 or macOS ARM64 because
-`litert-torch` depends on `litert-converter`, whose pinned release does not
-publish a Windows wheel. Install it with:
+The project uses Python 3.11.15 and uv 0.11.32, both pinned in `mise.toml`.
+Install the locked development environment with:
 
 ```bash
-mise install
-uv sync --locked --group dev --group export
-```
-
-The `uv.lock` file must be used without local changes. The `dev` group includes pytest, Ruff, mypy, YAML stubs, and Matplotlib/Agg for report tests; `export` includes ONNX, ONNX Runtime, Matplotlib/Agg, and LiteRT/AI Edge.
-
-### Windows
-
-Native Windows supports development tooling and unit tests, but not the
-LiteRT conversion preflight required by the canonical `train` and `export`
-workflows. PyTorch training stages support NVIDIA GPUs: the project selects the
-official CUDA 13.0 wheels for `torch` and `torchvision` on Windows. From
-PowerShell, install the compatible environment with:
-
-```powershell
-mise install
-(&mise activate pwsh) | Out-String | Invoke-Expression
 uv sync --locked --group dev
-uv run pytest
 ```
 
-Verify CUDA before starting a training stage:
+Before running the pipeline, provide these files on the local machine:
 
-```powershell
-uv run python -c "import torch; print(torch.__version__, torch.cuda.get_device_name(0), torch.cuda.is_available())"
-sentience-train train --config configs/default.yaml --device cuda
-```
+- `data/raw/fer2013.csv`
+- `models/pretrained/mobilenet_v3_small-047dcff4.pth`
+- `models/pretrained/resnet18-f37072fd.pth`
 
-Do not add `--group export` on native Windows: `litert-converter==0.3.0` has no
-source distribution or `win_amd64` wheel. The `uv` suggestion to add Windows to
-`tool.uv.required-environments` does not make that package installable.
+The pipeline never downloads data or weights. It validates the expected
+filenames, sizes, and SHA-256 digests of the ImageNet checkpoints before use.
 
-The repository may remain on the Windows `C:` drive when the complete workflow
-is run through WSL or a Linux container. Keep the environments separate because
-virtual environments are not portable between Windows and Linux. For example,
-from WSL with the repository mounted under `/mnt/c`:
+## Workflow
 
 ```bash
-cd /mnt/c/Users/<user>/path/to/sentience_train
-export UV_PROJECT_ENVIRONMENT=.venv-linux
-uv sync --locked --group dev --group export
+uv run sentience-train tune --config configs/tuning.yaml --plan
+uv run sentience-train tune --config configs/tuning.yaml
+uv run sentience-train train --config configs/default.yaml
+uv run sentience-train export --run-id <run-id>
 ```
 
-Windows can continue to use the default `.venv`; never reuse that directory
-from WSL or a container.
+`tune --plan` is read-only. `tune` creates or resumes a campaign with the same
+identity. `train` consumes the frozen shortlist and atomically publishes a
+training run. `export` validates and benchmarks the exact ONNX artifact
+published to `artifacts/exports/<run-id>/`.
 
-## Canonical dataset
+The CLI returns exit code 0 for success or reuse, 2 for invalid or incompatible
+input, and 1 for execution failure, an exhausted campaign, or a failed gate.
 
-The file is a UTF-8 CSV with the exact header `emotion,pixels,Usage`. Each record contains 2,304 integer pixels between 0 and 255, and `Usage` is `Training`, `PublicTest`, or `PrivateTest`. The accepted SHA-256 is:
+## Repository layout
 
 ```text
-3b8d9617d1017f34733c8f2474d7784c563ce86c40a86ac12c2d37cc968f871b
+configs/                  versioned experiment configurations
+data/raw/                 local source dataset
+models/pretrained/        validated source weights
+artifacts/
+  campaigns/              tuning plans, evidence, history, and checkpoints
+  runs/                   final training runs and selected checkpoints
+  exports/                published ONNX bundles
+  archive/campaigns/      locally archived campaigns
+reports/                  generated test and evaluation reports
+schemas/                  public JSON contracts
+src/sentience_train/      pipeline implementation
+tests/                    public-interface tests
+docs/                     context, decisions, and contracts
 ```
 
-The stable mapping from emotions to model outputs is `0 -> angry`, `3 -> happy`, `6 -> neutral`, and `4 -> sad`. Unselected data remains in the provenance, but only the four canonical classes are used for training. `Training` is used for optimization; `PublicTest` is used for validation, early stopping, calibration, and selection; `PrivateTest` may be read only once by a complete export of an explicitly supplied canonical run.
+`data/`, `models/`, `artifacts/`, and generated files under `reports/` remain
+local and are protected by `.gitignore`; only their `README.md` files are
+versioned. This keeps reproducible code and configuration separate from large
+or potentially private data, weights, checkpoints, and results.
 
-## Configuration and selection
+## Training recipe
 
-`configs/default.yaml` is the canonical configuration. The schema is strict: removed keys such as `model.name`, `training.seed`, and the entire `distillation` section are rejected. The CLI only allows overriding `training.epochs` with a value from 1 through 100 and `training.device` with `auto`, `cpu`, or `cuda`.
+The default optimization batch size is 128. T4 is the strong-augmentation
+baseline. T5 is a controlled stability variant with 0.05 label smoothing, five
+linear warmup epochs, and gradient clipping with a unit norm. After warmup, the
+learning rate follows cosine decay.
 
-Selection evaluates widths `0.25`, `0.35`, and `0.50`, in that order, with seeds `42`, `43`, and `44`. It stops at the first width that passes every gate. The representative is the median by INT8 macro-F1, with the lower seed as the tie-breaker. Each training run uses macro-F1 for early stopping, loss as the tie-breaker, and restores the best checkpoint. The loss is CrossEntropy with fixed class weights based on inverse square-root frequency and normalized by their mean.
+Every recipe change contributes to the `plan_hash`, creating a new campaign
+without overwriting previous results. The fixed architectures are DS-CNN,
+MobileNetV3-Small, and ResNet-18, trained with seeds 42, 43, and 44.
 
-PTQ is attempted first. QAT is triggered only by PTQ conversion failure or an accuracy loss above the limit; there is no teacher, MiniVGG, or distillation. If every DS-CNN candidate fails, the command creates an immutable `candidate-comparison.json`/`.md` diagnostic, creates no release, and does not access `PrivateTest`.
-
-## Training
+## Development
 
 ```bash
-sentience-train train --config configs/default.yaml
-sentience-train train --config configs/default.yaml --epochs 10 --device cpu
+uv run pytest
+uv run ruff check src tests
+uv run ruff format --check src tests
+uv run mypy src
+uv build
 ```
 
-The command logs the resolved training device (for example, `cuda` or `cpu`) and displays batch progress for each FP32 or QAT candidate, including the current epoch, training loss, validation loss, and macro-F1. The resolved and requested devices are also persisted in `logs/selection.jsonl`.
-
-The result is an immutable run in `runs/<id>/`, with a `manifest.json` that follows the `frozen-run/v1` schema, the resolved configuration, hashes, a `PublicTest` offset index, checkpoints, JSONL history, metrics, and candidate comparisons. Synthetic fixtures are useful for tests, but never serve as release evidence.
-
-## Export
-
-```bash
-sentience-train export --run-id <id>
-sentience-train export --run-id <id> --format onnx --runs-dir ./runs
-sentience-train export --run-id <id> --format tflite --runs-dir ./runs
-```
-
-`all` is the default and publishes to `exports/<id>/all/`. `onnx` and `tflite` are verifiable handoffs derived from the same frozen run. No format modifies the run; manifests and payloads are hash-checked, and publication and reuse are atomic.
-
-### ONNX FP32 handoff
-
-- `float32` dtype;
-- NCHW `[N,1,48,48]` layout;
-- dynamic batch;
-- `pixel / 127.5 - 1` normalization;
-- FP32 `[N,4]` output;
-- host parity validation against PyTorch using only the `PublicTest` index.
-
-### TFLite INT8 handoff
-
-- NHWC `[1,48,48,1]` layout;
-- fixed batch;
-- scale and zero point recorded in `input_contract.json`/`output_contract.json`;
-- `labels.txt`, an operator allowlist, and resource metadata shipped with the FlatBuffer;
-- `emotion_model_data.h` and `emotion_model_data.cc` generated from the same bytecode, with the same labels and size.
-
-### ESP32-S3-CAM N8R8
-
-Host gates enforce a FlatBuffer size of at most 1 MiB, an arena estimate with margin of at most 1.5 MiB, and at most 15 million MACs. Actual arena measurement and a p95 latency of 200 ms on the ESP32 remain `pending_external`; a host estimate is not presented as approval.
-
-## Metrics and reports
-
-`sentience_train.metrics` is the only metrics module used by training, selection, and release. Each document includes accuracy, macro-precision, macro-recall, macro-F1, loss, per-class precision/recall/F1, support, and the raw matrix in `angry,happy,neutral,sad` order. JSON matrices use `labels` and named `matrices`; CSV uses the long format `model,actual,predicted,count`; PNG is rendered with Matplotlib/Agg in a byte-deterministic manner.
-
-The release keeps `PublicTest` and `PrivateTest` evidence separate. `PrivateTest` predictions are not saved: only metrics, support, the matrix, and an access marker are persisted. Final statuses are accurately reported as `accepted` or `failed`, with gates, hashes, and diagnostics.
-
-## Real acceptance and integrity
-
-Acceptance is never part of the default suite (`pytest` uses `-m 'not acceptance'`). To run it, explicitly provide `SENTIENCE_RELEASE_RUN_ID` and, optionally, `SENTIENCE_RELEASE_RUNS_ROOT`/`SENTIENCE_RELEASE_EXPORTS_ROOT`:
-
-```bash
-SENTIENCE_RELEASE_RUN_ID=<id> pytest -m acceptance tests/test_release_acceptance.py
-```
-
-Without the real run and inputs, `pytest -m acceptance` fails; there is no skip or synthetic fallback. The `all` export authorizes `PrivateTest` only after validating the `frozen-run/v1` schema, the canonical CSV SHA-256, the PublicTest index, the checkpoint, TFLite, operators, and host gates. Earlier frozen runs, including manifests that record a teacher, remain consumable; the removal affects only the creation of new runs.
+Acceptance tests that require a real training run are disabled by default. See
+[docs/onnx-only.md](docs/onnx-only.md) for partition isolation, determinism, and
+publication details.
