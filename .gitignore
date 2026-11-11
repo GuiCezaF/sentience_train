@@ -90,11 +90,13 @@ local_settings.py
 *.nsys-rep
 core
 core.*
+!src/sentience_train/core/
+!src/sentience_train/core/*.py
 
 # Local datasets. Keep only the directory documentation in Git.
 /data/**
 !/data/README.md
-/dataset
+
 
 # Pretrained weights and serialized models. Keep only their documentation.
 /models/**
@@ -114,10 +116,6 @@ core.*
 # Training, tuning, evaluation, and release artifacts.
 /artifacts/**
 !/artifacts/README.md
-/runs/
-/exports/
-/tuning-runs/
-/archived-tuning-runs/
 
 # Generated reports. Keep only their documentation.
 /reports/**
