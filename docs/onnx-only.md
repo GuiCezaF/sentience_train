@@ -44,11 +44,20 @@ predictive margin and macro-F1, then minimize loss, in lexicographic order.
 
 ## Code modules
 
-`config.py`, `data.py`, `models.py`, and `recipes.py` define the experiment.
-`engine.py` is the PyTorch adapter. `campaign.py` owns tuning and shortlist
-freezing. `training.py` consumes a shortlist and publishes an immutable run
-through `artifacts.py`. `cli.py` is a thin adapter; tests exercise the same
-training interface as production.
+The implementation is grouped into four subpackages under
+`src/sentience_train/`:
+
+- `core/`: config and schema contracts, FER2013 data views, architectures,
+  recipes, and predictive metrics.
+- `engine/`: deterministic PyTorch trainer and transactional run staging.
+- `onnx/`: ONNX graph construction, parity validation, and host benchmarking.
+- `workflows/`: tuning campaign, full training, export, and release gates.
+
+`cli.py` at the package root remains a thin command-line adapter. The package
+initializer preserves legacy imports such as `sentience_train.config` and
+`sentience_train.campaign` by aliasing them to the canonical subpackage module
+objects. Tests are grouped under `tests/contracts/`, `tests/workflows/`, and
+`tests/acceptance/`; they exercise the same training interface as production.
 
 Repository inputs live under `data/raw/` and `models/pretrained/`. Mutable
 campaigns, runs, and release bundles live under `artifacts/`.
