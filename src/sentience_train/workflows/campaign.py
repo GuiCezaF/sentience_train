@@ -15,7 +15,7 @@ from typing import Any, Mapping
 
 import torch
 
-from .config import (
+from ..core.config import (
     ARCHITECTURES,
     TUNING_CAMPAIGN_SCHEMA,
     TUNING_PLAN_SCHEMA,
@@ -27,9 +27,9 @@ from .config import (
     canonical_hash,
     canonical_json,
 )
-from .data import DataValidationError, load_tuning_data
-from .engine import TorchTrainingEngine, TrainingEngine, TrainingRequest
-from .models import validate_weight_file, weight_identity
+from ..core.data import DataValidationError, load_tuning_data
+from ..engine.trainer import TorchTrainingEngine, TrainingEngine, TrainingRequest
+from ..core.models import validate_weight_file, weight_identity
 
 
 class CampaignError(RuntimeError):

@@ -5,11 +5,11 @@ from __future__ import annotations
 import argparse
 import sys
 
-from .campaign import CampaignError, execute_tune
-from .config import ConfigError, canonical_json, load_training_config, load_tuning_config
-from .data import DataValidationError
-from .export import export_frozen_run
-from .training import CampaignExhaustedError, TrainingPipelineError, execute_training
+from .workflows.campaign import CampaignError, execute_tune
+from .core.config import ConfigError, canonical_json, load_training_config, load_tuning_config
+from .core.data import DataValidationError
+from .workflows.export import export_frozen_run
+from .workflows.training import CampaignExhaustedError, TrainingPipelineError, execute_training
 
 
 def _parser() -> argparse.ArgumentParser:

@@ -15,12 +15,18 @@ from typing import Any, Mapping
 import numpy as np
 import torch
 
-from .benchmark import HostBenchmark, BenchmarkReport
-from .config import PRIVATE_TEST_ACCESS_SCHEMA, RELEASE_BUNDLE_SCHEMA, TrainingConfig, canonical_hash, canonical_json
-from .data import EMOTION_TO_LABEL, load_training_data
-from .models import build_model
-from .metrics import metrics_from_predictions
-from .onnx_artifact import OnnxArtifact, OnnxEvidence
+from ..onnx.benchmark import BenchmarkReport, HostBenchmark
+from ..core.config import (
+    PRIVATE_TEST_ACCESS_SCHEMA,
+    RELEASE_BUNDLE_SCHEMA,
+    TrainingConfig,
+    canonical_hash,
+    canonical_json,
+)
+from ..core.data import EMOTION_TO_LABEL, load_training_data
+from ..core.models import build_model
+from ..core.metrics import metrics_from_predictions
+from ..onnx.onnx_artifact import OnnxArtifact, OnnxEvidence
 
 
 class ReleaseError(RuntimeError):

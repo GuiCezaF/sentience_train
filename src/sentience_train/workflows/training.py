@@ -6,9 +6,9 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
-from .artifacts import RunStaging
+from ..engine.artifacts import RunStaging
 from .campaign import CampaignError, load_campaign_manifest
-from .config import (
+from ..core.config import (
     NORMALIZATION_FORMULA,
     NORMALIZATION_ORDER,
     RGB_KERNEL_TRANSFORM,
@@ -17,15 +17,15 @@ from .config import (
     ConfigError,
     TrainingConfig,
 )
-from .data import TrainingData, load_training_data
-from .engine import (
+from ..core.data import TrainingData, load_training_data
+from ..engine.trainer import (
     SeedEvidence,
     TorchTrainingEngine,
     TrainingEngine,
     TrainingRequest,
 )
-from .metrics import order_candidates
-from .recipes import default_recipe_grid
+from ..core.metrics import order_candidates
+from ..core.recipes import default_recipe_grid
 
 
 class TrainingPipelineError(RuntimeError):

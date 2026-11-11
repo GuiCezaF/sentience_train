@@ -11,8 +11,8 @@ import numpy as np
 import torch
 from torch import nn
 
-from .config import ONNX_CONTRACT_SCHEMA, NORMALIZATION_FORMULA, NORMALIZATION_ORDER
-from .models import PublicOnnxWrapper
+from ..core.config import NORMALIZATION_FORMULA, NORMALIZATION_ORDER, ONNX_CONTRACT_SCHEMA
+from ..core.models import PublicOnnxWrapper
 
 ONNX_OPSET = 18
 

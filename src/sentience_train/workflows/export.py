@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .config import load_training_config
+from ..core.config import load_training_config
 from .release import ReleaseError, ReleasePublisher, ReleaseResult
 
 

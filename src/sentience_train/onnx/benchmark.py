@@ -11,7 +11,7 @@ from typing import Any
 
 import numpy as np
 
-from .config import HOST_BENCHMARK_SCHEMA, QualityGatesConfig
+from ..core.config import HOST_BENCHMARK_SCHEMA, QualityGatesConfig
 
 
 class BenchmarkError(RuntimeError):

@@ -15,11 +15,11 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
-from .config import ARCHITECTURES, QualityGatesConfig, TrainingConfig
-from .data import TuningData, TrainingData
-from .metrics import GateResult, Metrics, evaluate_predictive_gate, metrics_from_predictions
-from .models import build_model
-from .recipes import RecipeSpec, learning_rate_for, scheduled_learning_rate
+from ..core.config import ARCHITECTURES, QualityGatesConfig, TrainingConfig
+from ..core.data import TrainingData, TuningData
+from ..core.metrics import GateResult, Metrics, evaluate_predictive_gate, metrics_from_predictions
+from ..core.models import build_model
+from ..core.recipes import RecipeSpec, learning_rate_for, scheduled_learning_rate
 
 
 class TrainingError(RuntimeError):
